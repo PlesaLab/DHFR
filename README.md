@@ -23,7 +23,7 @@ This R Notebook provides complete reproducibility of the data analysis presented
 
 [Dialout Variants Fitness Analysis]()
 
-**NCBI BioProject:** [PRJNA794857]() for raw .fastq files
+**NCBI BioProject:** [PRJNA...]() for raw .fastq files
 _____________________________________
 
 This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an E. coli knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NextSeq platform using 100 bp paired-end sequencing read amplicons.
