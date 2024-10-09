@@ -11,7 +11,7 @@ This R Notebook provides complete reproducibility of the data analysis presented
 
 [Sequencing Counts Analysis]()
 
-[Perfects Homologs Analysis]()
+[Perfect Homologs Analysis]()
 
 [Mutant Homologs Analysis]()
 
