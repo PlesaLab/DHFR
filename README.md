@@ -15,9 +15,9 @@ This pipeline processes a library of 1,536 DHFR homologs and their associated mu
 
 [Sequencing Counts Analysis]()
 
-[Designed Homologs (Perfects) Analysis]()
+[Perfects Homologs Analysis]()
 
-[Designed Homologs (Mutants) Analysis]()
+[Mutant Homologs Analysis]()
 
 [Broad Mutational Scanning Analysis]()
 
