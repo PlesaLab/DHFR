@@ -12,12 +12,19 @@ This pipeline processes a library of 1,536 DHFR homologs and their associated mu
 **Links to Rendered Code:**
 
 [Mapping Files Analysis]()
+
 [Sequencing Counts Analysis]()
+
 [Designed Homologs (Perfects) Analysis]()
+
 [Designed Homologs (Mutants) Analysis]()
+
 [Broad Mutational Scanning Analysis]()
+
 [Gain-of-Function Mutants Analysis]()
+
 [Resistant Taxa Fitness Analysis]()
+
 [Dialout Variants Fitness Analysis]()
 
 **NCBI BioProject:** [PRJNA794857]() for raw .fastq files
