@@ -3,7 +3,7 @@
 ### [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa
 _____________________________________
 
-This R Notebook provides complete reproducibility of the data analysis presented in ***"Broad Mutational Scanning for Antibiotic Resistance in the DHFR Protein Family Using Multiplexed Gene Synthesis in Emulsions"*** by Romanowicz, Resnick, Hinton, and Plesa (*In Prep*).
+This R Notebook provides complete reproducibility of the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*In Prep*).
 
 **Links to Rendered Code:**
 
