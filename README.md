@@ -5,7 +5,7 @@ _____________________________________
 
 This R Notebook provides complete reproducibility of the data analysis presented in:
 
-Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** biorXiv. *In Review*.
+Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. ***Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning.*** biorXiv.
 
 The preprint is now available on [biorXiv]().
 
