@@ -3,7 +3,11 @@
 ### [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa
 _____________________________________
 
-This R Notebook provides complete reproducibility of the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa. The preprint is now available on [biorXiv]().
+This R Notebook provides complete reproducibility of the data analysis presented in:
+
+Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** biorXiv. *In Review*.
+
+The preprint is now available on [biorXiv]().
 
 **Links to Rendered Code:**
 
