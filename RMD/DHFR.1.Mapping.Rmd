@@ -1,0 +1,402 @@
+---
+title: "Mapping Files Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Mapping Data Analysis
+
+<font color="blue">**This section is based on the R file: "R_load_data.R".**</font> It describes how to load all of the pre-existing barcode mapping data necessary for downstream analysis.
+
+**Pre-Existing Data Files to Import**
+
+* **BCinfo:** Mapping Information (one for each library)
+* **mutIDinfo:** Mutant Information (one for each library)
+* **BCs:** Everything Sequenced (one for each library)
+* **BCmut:** Only Mapped Barcodes (one for each library)
+
+## Import Barcode Info
+**Begin the analysis by loading in the barcode information for each codon-version library.** This data represents each **barcode** [`BC`] recovered from the complementation process, linked to each **homolog or mutant** [`mutID`], the **number of mutations** observed in the sequence relative to its designed homolog [`mutations`], a list of where the **mutations occurred** along the protein sequence[`cigar`], and the **number of reads** associated with each barcode [`reads`]:
+```{r}
+# Library 15 (Codon 1)
+BCinfo15 = read.csv("Mapping/map_files_raw/15_HiFi_BC_mutID_all.csv", head=TRUE)  # read csv file
+
+# Library 16 (Codon 2)
+BCinfo16 = read.csv("Mapping/map_files_raw/16_HiFi_BC_mutID_all.csv", head=TRUE)  # read csv file
+```
+
+### Filter Mutations
+
+Filter each dataset to ensure each mutant has >=0 mutations
+```{r class.output="goodCode"}
+## Make sure each mutant has >=0 mutations by removing rows with negative values
+BCinfo15 <- BCinfo15 %>%
+  filter(mutations >= 0)
+
+# Check mutate count for Lib15 (should be "0"):
+min(BCinfo15$mutations)
+
+## Make sure each mutant has >=0 mutations by removing rows with negative values
+BCinfo16 <- BCinfo16 %>%
+  filter(mutations >= 0)
+
+# Check mutate count for Lib16 (should be "0"):
+min(BCinfo16$mutations)
+```
+
+<font color="green">**Preview of BCinfo**</font>
+```{r echo=FALSE}
+# Library 15
+head(BCinfo15)
+
+# Library 16
+head(BCinfo16)
+```
+
+### Unique BC Counts
+
+**Total BC Read Counts:** Summarize the total number of reads associated with all BCs for both libraries:
+```{r class.output="goodCode"}
+#Lib15
+BCinfo15.read.count <- sum(BCinfo15$reads)
+format(BCinfo15.read.count, big.mark = ",")
+
+#Lib16
+BCinfo16.read.count <- sum(BCinfo16$reads)
+format(BCinfo16.read.count, big.mark = ",")
+```
+
+**Total BCs:** Count the number of unique barcodes for each library
+```{r class.output="goodCode"}
+# Count the number of unique barcodes for Library 15
+BCinfo15.count <- length(unique(BCinfo15$BC))
+format(BCinfo15.count, big.mark = ",")
+
+# Count the number of unique barcodes for Library 16
+BCinfo16.count <- length(unique(BCinfo16$BC))
+format(BCinfo16.count, big.mark = ",")
+```
+
+**Perfects BCs:** Count the number of unique barcodes that have zero mutations (i.e., BCs associated with perfects). Note that many of these barcodes are likely associated with the same protein sequence and do not represent the total number of perfects recovered from the dataset.
+```{r class.output="goodCode"}
+# Count the number of rows containing zero (0) mutations for Library 15
+BCinfo15.count.zeros <- sum(BCinfo15$mutations == 0)
+format(BCinfo15.count.zeros, big.mark = ",")
+
+# Count the number of rows containing zero (0) mutations for Library 16
+BCinfo16.count.zeros <- sum(BCinfo16$mutations == 0)
+format(BCinfo16.count.zeros, big.mark = ",")
+```
+
+**Mutant BCs:** Count the number of unique unique barcodes that have at least 1 mutation (i.e., BCs associated with mutants). Note that many of these barcodes are likely associated with the same protein sequence and do not represent the total number of mutants recovered from the dataset.
+```{r class.output="goodCode"}
+# Count the number of rows containing >=1 mutation for Library 15
+BCinfo15.count.nonzeros <- sum(BCinfo15$mutations != 0)
+format(BCinfo15.count.nonzeros, big.mark = ",")
+
+# Count the number of rows containing >=1 mutation for Library 16
+BCinfo16.count.nonzeros <- sum(BCinfo16$mutations != 0)
+format(BCinfo16.count.nonzeros, big.mark = ",")
+```
+
+## Import Mutant Info
+**Load in the mutant information for each codon-version library.** This data represents each **mutant** sequence [`mutID`] from the dataset, the **designed homolog** it mutated from [`IDalign`], the **number of barcodes** associated with each mutant [`numBCs`], the **number of mutations** in the sequence relative to the designed homolog [`mutations`], the **full sequence** of the mutant [`seq`], the **percent identity of the mutant** to the designed homolog [`pct_ident`], a list of **all barcodes** associated with the mutant [`BCs`], and the **barcode code** [`BCcode`]:
+```{r}
+# Library 15 (Codon 1)
+mutIDinfo15 = read.csv("Mapping/map_files_raw/15_HiFi_mutID_info_all.csv", head=TRUE)  # read csv file
+
+# Library 16 (Codon 2)
+mutIDinfo16 = read.csv("Mapping/map_files_raw/16_HiFi_mutID_info_all.csv", head=TRUE)  # read csv file
+```
+
+### Filter Mutations
+
+Filter each dataset to ensure each mutant has >=0 mutations
+```{r class.output="goodCode"}
+## Make sure each mutant has >=0 mutations by removing rows with negative values
+mutIDinfo15 <- mutIDinfo15 %>%
+  filter(mutations >= 0)
+
+# Check mutate count for Lib15 (should be "0"):
+min(mutIDinfo15$mutations)
+
+## Make sure each mutant has >=0 mutations by removing rows with negative values
+mutIDinfo16 <- mutIDinfo16 %>%
+  filter(mutations >= 0)
+
+# Check mutate count for Lib16 (should be "0"):
+min(mutIDinfo16$mutations)
+```
+
+<font color="green">**Preview of mutIDinfo**</font>
+```{r echo=FALSE}
+# Library 15
+head(mutIDinfo15)
+
+# Library 16
+head(mutIDinfo16)
+```
+
+### Unique Sequence Counts
+
+**Total Sequences:** Count the number of unique protein sequences in each library
+```{r class.output="goodCode"}
+# Count the number of unique protein sequences for Library 15
+mutIDinfo15.count <- length(unique(mutIDinfo15$seq))
+format(mutIDinfo15.count, big.mark = ",")
+
+# Count the number of unique protein sequences for Library 16
+mutIDinfo16.count <- length(unique(mutIDinfo16$seq))
+format(mutIDinfo16.count, big.mark = ",")
+```
+
+**Perfect Sequences:** Count the number of unique protein sequences that have zero mutations (i.e., sequences associated with perfects). These values designate the number of true homologs ("perfects") that match the designed homologs without mutations.
+```{r class.output="goodCode"}
+# Count the number of rows containing zero (0) mutations for Library 15
+mutIDinfo15.count.zeros <- sum(mutIDinfo15$mutations == 0)
+format(mutIDinfo15.count.zeros, big.mark = ",")
+
+# Count the number of rows containing zero (0) mutations for Library 16
+mutIDinfo16.count.zeros <- sum(mutIDinfo16$mutations == 0)
+format(mutIDinfo16.count.zeros, big.mark = ",")
+```
+
+**Mutant Sequences:** Count the number of unique protein sequences that have at least 1 mutation (i.e., sequences associated with mutants). These values designate the number of mutants derived from the designed homologs.
+```{r class.output="goodCode"}
+# Count the number of rows containing >=1 mutation for Library 15
+mutIDinfo15.count.nonzeros <- sum(mutIDinfo15$mutations != 0)
+format(mutIDinfo15.count.nonzeros, big.mark = ",")
+
+# Count the number of rows containing >=1 mutation for Library 16
+mutIDinfo16.count.nonzeros <- sum(mutIDinfo16$mutations != 0)
+format(mutIDinfo16.count.nonzeros, big.mark = ",")
+```
+
+Count the number of shared perfect protein sequences between libraries (mutations == 0).
+```{r class.output="goodCode"}
+# Merge the mutIDinfo datasets but keep only the mutIDs shared between libraries
+mutIDinfo.15.16.zeros.shared <- merge(mutIDinfo15, mutIDinfo16, by = "mutID", all = FALSE)
+
+# Count the number of perfects (mutations == 0) shared between both libraries
+mutIDinfo.15.16.zeros.shared.count <- sum(mutIDinfo.15.16.zeros.shared$mutations.x == 0)
+format(mutIDinfo.15.16.zeros.shared.count, big.mark = ",")
+```
+
+Also count the number of perfect sequences unique to one or the other library (mutations == 0).
+```{r class.output="goodCode"}
+# Merge the mutIDinfo datasets but retain only the mutIDs unique to one library or the other
+mutIDinfo.15.16.zeros.unique <- bind_rows(
+  anti_join(mutIDinfo15, mutIDinfo16, by = "mutID"),
+  anti_join(mutIDinfo16, mutIDinfo15, by = "mutID"))
+
+# Count the number of perfects (mutations == 0) unique to one library or the other
+mutIDinfo.15.16.zeros.unique.count <- sum(mutIDinfo.15.16.zeros.unique$mutations == 0)
+format(mutIDinfo.15.16.zeros.unique.count, big.mark = ",")
+```
+
+Count the total number of shared and unique perfects between libraries:
+```{r class.output="goodCode"}
+mutIDinfo.15.16.zeros.all.count <- sum(mutIDinfo.15.16.zeros.shared.count + mutIDinfo.15.16.zeros.unique.count)
+format(mutIDinfo.15.16.zeros.all.count, big.mark = ",")
+```
+
+## Add Map Identifiers
+
+Add the IDalign column to the "BCinfo" objects based on shared "mutID" values with the "mutIDinfo" objects:
+```{r}
+# Lib 15
+BCinfo15$IDalign <- mutIDinfo15$IDalign[match(BCinfo15$mutID, mutIDinfo15$mutID)]
+
+# Lib 16
+BCinfo16$IDalign <- mutIDinfo16$IDalign[match(BCinfo16$mutID, mutIDinfo16$mutID)]
+```
+
+Add "Lib" column with value==1 for each BC present in the "BCinfo" object
+```{r}
+# Add a new column "NewColumn" with every row value set to 1
+
+# Lib 15
+BCinfo15 <- BCinfo15 %>% mutate(Lib15 = 1)
+
+# Lib 16
+BCinfo16 <- BCinfo16 %>% mutate(Lib16 = 1)
+```
+
+## Merge Mapping Files
+
+Merge the "BCinfo" and "mutIDinfo" mapping files by shared "mutID" values for each library
+```{r}
+# Lib15
+
+# Merge mapping files by "mutID"
+BCs_mutID_15 <- inner_join(BCinfo15, 
+                           mutIDinfo15 %>% select(-BCs), 
+                           by = "mutID")
+
+# Select columns of interest to remove duplicates
+BCs_mutID_15 <- BCs_mutID_15 %>%
+  select(BC, mutID, IDalign.x, mutations.x, cigar, numBCs, seq, pct_ident)
+
+# Rename columns
+names(BCs_mutID_15) <- c("BC","mutID","IDalign","mutations","cigar","numBCs","seq","pct_ident")
+
+# Lib16
+
+# Merge mapping files by "mutID"
+BCs_mutID_16 <- inner_join(BCinfo16, 
+                           mutIDinfo16 %>% select(-BCs), 
+                           by = "mutID")
+
+# Select columns of interest to remove duplicates
+BCs_mutID_16 <- BCs_mutID_16 %>%
+  select(BC, mutID, IDalign.x, mutations.x, cigar, numBCs, seq, pct_ident)
+
+# Rename columns
+names(BCs_mutID_16) <- c("BC","mutID","IDalign","mutations","cigar","numBCs","seq","pct_ident")
+```
+
+# Save Mapping Files
+
+Save the formatted mapping files to import for downstream analyses
+```{r}
+# BCinfo15 (185.4 MB)
+write.csv(BCinfo15, "Mapping/map_files_formatted/BCinfo15.csv", row.names = FALSE)
+
+# BCinfo16 (225.7 MB)
+write.csv(BCinfo16, "Mapping/map_files_formatted/BCinfo16.csv", row.names = FALSE)
+
+###------------------------------------
+
+# mutIDinfo15 (140 MB)
+write.csv(mutIDinfo15, "Mapping/map_files_formatted/mutIDinfo15.csv", row.names = FALSE)
+
+# mutIDinfo16 (144.1 MB)
+write.csv(mutIDinfo16, "Mapping/map_files_formatted/mutIDinfo16.csv", row.names = FALSE)
+
+###------------------------------------
+
+# BCs_mutID_15 (367.8 MB | Previously 53.13 GB when including "BCs" column)
+write.csv(BCs_mutID_15, "Mapping/map_files_formatted/BCs_mutID_15.csv", row.names = FALSE)
+
+# BCs_mutID_16 (416.8 MB | Previously 211.83 GB when including "BCs" column)
+write.csv(BCs_mutID_16, "Mapping/map_files_formatted/BCs_mutID_16.csv", row.names = FALSE)
+
+###------------------------------------
+
+# mutIDinfo.15.16.zeros.shared (19.4 MB)
+write.csv(mutIDinfo.15.16.zeros.shared, "Mapping/map_files_formatted/mutIDinfo.15.16.zeros.shared.csv", 
+          row.names = FALSE)
+
+# mutIDinfo.15.16.zeros.unique (264.3 MB)
+write.csv(mutIDinfo.15.16.zeros.unique, "Mapping/map_files_formatted/mutIDinfo.15.16.zeros.unique.csv", 
+          row.names = FALSE)
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
