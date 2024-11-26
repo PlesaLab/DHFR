@@ -1,0 +1,3987 @@
+---
+title: "Mutant Homologs Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Import Data Files
+
+Import **PERFECTS** files generated from [DHFR.3.Perfects.RMD](https://github.com/PlesaLab/DHFR)
+```{r}
+### BCs_map------------------------------
+
+# BCs15_map
+BCs15_map <- read.csv("Perfects/perfects_files_formatted/BCs15_map.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# BCs16_map
+BCs16_map <- read.csv("Perfects/perfects_files_formatted/BCs16_map.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+### mutIDinfo------------------------------
+
+# mutIDinfo15
+mutIDinfo15 <- read.csv("Perfects/perfects_files_formatted/mutIDinfo15.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# mutIDinfo16
+mutIDinfo16 <- read.csv("Perfects/perfects_files_formatted/mutIDinfo16.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+### perfects_5BCs--------------------------
+
+# perfects15_5BCs
+perfects15_5BCs <- read.csv("Perfects/perfects_files_formatted/perfects15_5BCs.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# perfects16_5BCs
+perfects16_5BCs <- read.csv("Perfects/perfects_files_formatted/perfects16_5BCs.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# perfects_15_16_5BCs_tree
+perfects_15_16_5BCs_tree <- read.csv("Perfects/perfects_files_formatted/perfects_15_16_5BCs_tree.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+### BCcontrols_shared_median---------------
+
+# BCcontrols_15_16_shared_median_WT
+BCcontrols_15_16_shared_median_WT <- read.csv("Perfects/perfects_files_formatted/BCcontrols_15_16_shared_median_WT.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# BCcontrols_15_16_shared_median_Neg
+BCcontrols_15_16_shared_median_Neg <- read.csv("Perfects/perfects_files_formatted/BCcontrols_15_16_shared_median_Neg.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+### Miscellaneous-------------------------
+
+# orginfo
+orginfo <- read.csv("Perfects/perfects_files_formatted/orginfo.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# Alltree15_taxa_merged
+Alltree15_taxa_merged <- read.csv("Perfects/perfects_files_formatted/Alltree15_taxa_merged.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+# Mutants Data Analysis
+
+## Fitness vs Distance
+
+<font color="blue">**This section is based on the R file: "R_change_in_fitness_vs_distance.R".**</font> It determines how fitness changes with mutation distance.
+
+### Mutant Summary
+
+The first thing we need to do is summarize the mutant dataset associated with each library. Using the `BC_map` datasets, summarize the number of unique mutants (mutID) at each sampling condition. Second, we'll calculate the median number of unique mutants associated with unique homologs at every sampling condition. Then, we'll calculate the number of raw sequence counts associated with mutants at numerous mutation levels and their percentage of total mutants for each codon version for the following levels: 0 mutants, 1 mutant, 2-5 mutants, 6-50 mutants, 51-100 mutants, 100+ mutants.
+
+#### Lib15
+
+**Unique Mutants:** Calculate the number of unique mutants mapped across all nine conditions. Then re-calculate to only include mutants with 1-5 amino acid changes:
+```{r class.output="goodCode"}
+# Unique Mutants
+length(unique(BCs15_map$mutID[BCs15_map$mutations > 0]))
+
+# Unique Mutants (with 1-5 mutations)
+length(unique(BCs15_map$mutID[BCs15_map$mutations > 0 & BCs15_map$mutations < 6]))
+```
+
+
+**Mutants per Treatment:** Calculate the number of unique mutants (mutID) recovered from each sampling condition:
+```{r class.output="goodCode"}
+# Define the treatments
+L15.mutID.mutants.treatments <- c("LB", "M9, Full Supplement", "M9, Complementation", "M9, 0.058-TMP", 
+                "M9, 0.5-TMP", "M9, 1.0-TMP", "M9, 10-TMP", "M9, 50-TMP", "M9, 200-TMP")
+
+# Calculate unique IDalign counts
+L15.mutID.mutants.result <- BCs15_map %>%
+  filter(mutations > 0) %>%
+  summarise(
+    D01 = n_distinct(mutID[!is.na(D01)]),
+    D03 = n_distinct(mutID[!is.na(D03)]),
+    D05 = n_distinct(mutID[!is.na(D05)]),
+    D06 = n_distinct(mutID[!is.na(D06)]),
+    D07 = n_distinct(mutID[!is.na(D07)]),
+    D08 = n_distinct(mutID[!is.na(D08)]),
+    D09 = n_distinct(mutID[!is.na(D09)]),
+    D10 = n_distinct(mutID[!is.na(D10)]),
+    D11 = n_distinct(mutID[!is.na(D11)]))
+
+# Transform the result to a more readable format
+L15.mutID.mutants.result_table <- tibble(
+  Treatment = L15.mutID.mutants.treatments,
+  `Unique mutID Count` = as.numeric(L15.mutID.mutants.result[1,]))
+
+# Print the table
+print(L15.mutID.mutants.result_table, n = Inf)
+```
+
+**Median Mutants per Homolog:** Calculate the median number of unique mutants (mutID) associated with unique homologs (IDalign) recovered from each sampling condition:
+```{r class.output="goodCode"}
+# Define the treatments
+L15.mutID.mutants.median.treatments <- c("LB", "M9, Full Supplement", "M9, Complementation", "M9, 0.058-TMP", 
+                "M9, 0.5-TMP", "M9, 1.0-TMP", "M9, 10-TMP", "M9, 50-TMP", "M9, 200-TMP")
+
+L15.mutID.mutants.median.sampleID <- c("D01", "D03", "D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+# Calculate median unique mutID (mutations > 0) per unique IDalign (mutations = 0)
+L15.mutID.mutants.median.result <- BCs15_map %>%
+  group_by(IDalign) %>%
+  summarise(
+    D01=if(any(mutations==0 & !is.na(D01))) median(n_distinct(mutID[mutations>0 & !is.na(D01)])) else NA_real_,
+    D03=if(any(mutations==0 & !is.na(D03))) median(n_distinct(mutID[mutations>0 & !is.na(D03)])) else NA_real_,
+    D05=if(any(mutations==0 & !is.na(D05))) median(n_distinct(mutID[mutations>0 & !is.na(D05)])) else NA_real_,
+    D06=if(any(mutations==0 & !is.na(D06))) median(n_distinct(mutID[mutations>0 & !is.na(D06)])) else NA_real_,
+    D07=if(any(mutations==0 & !is.na(D07))) median(n_distinct(mutID[mutations>0 & !is.na(D07)])) else NA_real_,
+    D08=if(any(mutations==0 & !is.na(D08))) median(n_distinct(mutID[mutations>0 & !is.na(D08)])) else NA_real_,
+    D09=if(any(mutations==0 & !is.na(D09))) median(n_distinct(mutID[mutations>0 & !is.na(D09)])) else NA_real_,
+    D10=if(any(mutations==0 & !is.na(D10))) median(n_distinct(mutID[mutations>0 & !is.na(D10)])) else NA_real_,
+    D11=if(any(mutations==0 & !is.na(D11))) median(n_distinct(mutID[mutations>0 & !is.na(D11)])) else NA_real_) %>%
+  summarise(across(starts_with("D"), ~median(., na.rm = TRUE)))  # Only summarize D* columns
+
+# Transform the result to a more readable format
+L15.mutID.mutants.median.result_table <- tibble(
+  SampleID = L15.mutID.mutants.median.sampleID,
+  Treatment = L15.mutID.mutants.median.treatments,
+  `Median Unique mutID per Unique IDalign` = as.numeric(L15.mutID.mutants.median.result[1,]))
+
+# Print the table
+print(L15.mutID.mutants.median.result_table, n = Inf)
+```
+
+Validate the median mutants (mutID) per homology (IDalign) for Complementation (D05):
+```{r class.output="goodCode"}
+# Calculate intermediate results
+D05_validate_result <- BCs15_map %>%
+  group_by(IDalign) %>%
+  summarise(
+    D05_mutants_count = sum(mutations > 0 & !is.na(D05)),
+    D05_non_mutants_count = sum(mutations == 0 & !is.na(D05)),
+    D05_unique_mutID_count = n_distinct(mutID[mutations > 0 & !is.na(D05)]))
+
+# Remove rows where D01_non_mutants_count == 0
+D05_filtered <- D05_validate_result %>%
+  filter(D05_non_mutants_count > 0)
+
+# Print full results showing median mutID for each IDalign in D05:
+print("Full IDalign results for D05:")
+print(D05_filtered, n = Inf)
+
+# Save a copy as a spreadsheet
+write.csv(D05_filtered, "Mutants/OUTPUT/L15.D05.median.mutID.per.IDalign.csv", row.names = FALSE)
+
+# Print summary results of median mutID per IDalign in D05:
+print("Summary of filtered results:")
+print(summary(D05_filtered))
+
+# Calculate median using the filtered data
+median_mutants_D05 <- median(D05_filtered$D05_unique_mutID_count, na.rm = TRUE)
+
+print(paste("Median number of unique mutants per IDalign for D05:", median_mutants_D05))
+```
+
+**Mutant Counts by Distance:** Summarize the raw sequence counts across mapped barcodes at numerous mutation levels:
+```{r class.output="goodCode"}
+# Define the columns we want to summarize
+L15.columns_to_summarize <- c("D01", "D03", "D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+# Create a function to sum values for multiple columns
+L15.sum_columns <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L15.columns_to_summarize), ~sum(., na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Sum values for each condition
+L15.summary_all <- bind_rows(
+  BCs15_map %>% filter(mutations == 0) %>% L15.sum_columns("mutations == 0"),
+  BCs15_map %>% filter(mutations == 1) %>% L15.sum_columns("mutations == 1"),
+  BCs15_map %>% filter(mutations >= 2 & mutations <= 5) %>% L15.sum_columns("mutations 2-5"),
+  BCs15_map %>% filter(mutations >= 6 & mutations <= 50) %>% L15.sum_columns("mutations 6-50"),
+  BCs15_map %>% filter(mutations >= 51 & mutations <= 100) %>% L15.sum_columns("mutations 51-100"),
+  BCs15_map %>% filter(mutations > 100) %>% L15.sum_columns("mutations > 100")
+)
+
+# Add a total row to the sum table
+L15.summary_all_with_total <- L15.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total sum for each column
+L15.summary_percentage <- L15.summary_all %>%
+  mutate(across(all_of(L15.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L15.summary_percentage_with_total <- L15.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L15.summary_all_rounded <- L15.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+L15.summary_percentage_rounded <- L15.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the sum table
+cat("Table 1: Sum of values for each condition\n")
+print(L15.summary_all_rounded, n = Inf, width = Inf)
+
+# Print the percentage table
+cat("\nTable 2: Percentage of total sum for each condition\n")
+print(L15.summary_percentage_rounded, n = Inf, width = Inf)
+
+# Optionally, save the tables to CSV files
+write.csv(L15.summary_all_rounded, "Mutants/OUTPUT/L15.sum_by_mutations_with_total.csv", row.names = FALSE)
+write.csv(L15.summary_percentage_rounded, "Mutants/OUTPUT/L15.percentage_by_mutations_with_total.csv", row.names = FALSE)
+```
+
+Calculate the sum of raw sequence reads for each treatment condition from the original `BCs15_map` object to verify sum totals in "summary_all_rounded" (above).
+```{r class.output="goodCode"}
+# Define the columns we want to summarize
+BCs15.columns_to_summarize <- c("D01", "D03", "D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+# Calculate the sums for each column
+BCs15.sums_table <- BCs15_map %>%
+  summarise(across(all_of(BCs15.columns_to_summarize), ~sum(., na.rm = TRUE)))
+
+# Convert to a more readable format
+BCs15.sums_table_long <- BCs15.sums_table %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Column", 
+               values_to = "Sum")
+
+# Round the sums for better readability
+BCs15.sums_table_long$Sum <- round(BCs15.sums_table_long$Sum, 2)
+
+# Print the table
+cat("Table: Sums for specified columns in BCs15_map\n")
+print(BCs15.sums_table_long, n = Inf)
+```
+
+**Piechart:** Plot the percent sums as a pie chart to show distribution of mutations in mapped barcodes:
+```{r}
+# Prepare data for the pie chart
+L15.pie_data <- L15.summary_percentage_rounded %>%
+  filter(condition != "Total") %>%  # Remove the "Total" category
+  select(condition, D05_pct) %>%
+  arrange(desc(D05_pct))  # Sort in descending order for better visualization
+
+# Ensure condition is a factor with the correct order
+L15.mutation_order <- 
+  c("mutations == 0", "mutations == 1", "mutations 2-5", "mutations 6-50", "mutations 51-100", "mutations > 100")
+
+L15.pie_data$condition <- factor(L15.pie_data$condition, levels = L15.mutation_order)
+
+# Create labels with percentages
+L15.pie_data$label <- paste0(L15.pie_data$condition, " (", round(L15.pie_data$D05_pct, 1), "%)")
+
+# Calculate the positions for the labels
+L15.pie_data <- L15.pie_data %>%
+  arrange(condition) %>%
+  mutate(
+    prop = D05_pct / sum(D05_pct),
+    ypos = cumsum(prop) - 0.5 * prop,
+    label_position = cumsum(prop) - prop / 2
+  )
+
+# Create a custom blue color palette
+L15.n_colors <- nrow(L15.pie_data)
+L15.blue_palette <- colorRampPalette(c("lightblue", "darkblue"))(L15.n_colors)
+
+# Create the pie chart
+L15.pie_chart <- ggplot(L15.pie_data, aes(x = 1, y = D05_pct, fill = condition)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y", start = 0) +
+  labs(title = "Distribution of Mutation Groups \nfor Complementation (Codon 1)",
+       fill = "Mutation Group") +
+  theme_void() +
+  theme(legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)) +
+  scale_fill_manual(values = L15.blue_palette, labels = L15.pie_data$label) +
+  scale_y_continuous(labels = percent_format())
+
+# Display the pie chart
+print(L15.pie_chart)
+```
+
+```{r echo=FALSE}
+# Save the pie chart
+ggsave("Mutants/PLOTS/L15.percent_sum_D05_pie_chart_blue.png", 
+       L15.pie_chart, width = 10, height = 8, dpi = 300)
+```
+
+#### Lib16
+
+**Unique Mutants:** Calculate the number of unique mutants mapped across all nine conditions. Then re-calculate to only include mutants with 1-5 amino acid changes:
+```{r class.output="goodCode"}
+# Unique Mutants
+length(unique(BCs16_map$mutID[BCs16_map$mutations > 0]))
+
+# Unique Mutants (with 1-5 mutations)
+length(unique(BCs16_map$mutID[BCs16_map$mutations > 0 & BCs16_map$mutations < 6]))
+```
+
+**Mutants per Treatment:** Calculate the number of unique mutants (mutID) recovered from each sampling condition:
+```{r class.output="goodCode"}
+# Define the treatments
+L16.mutID.mutants.treatments <- c("LB", "M9, Full Supplement", "M9, Complementation", "M9, 0.058-TMP", 
+                "M9, 0.5-TMP", "M9, 1.0-TMP", "M9, 10-TMP", "M9, 50-TMP", "M9, 200-TMP")
+
+# Calculate unique IDalign counts
+L16.mutID.mutants.result <- BCs16_map %>%
+  filter(mutations > 0) %>%
+  summarise(
+    D02 = n_distinct(mutID[!is.na(D02)]),
+    D04 = n_distinct(mutID[!is.na(D04)]),
+    D12 = n_distinct(mutID[!is.na(D12)]),
+    E01 = n_distinct(mutID[!is.na(E01)]),
+    E02 = n_distinct(mutID[!is.na(E02)]),
+    E03 = n_distinct(mutID[!is.na(E03)]),
+    E04 = n_distinct(mutID[!is.na(E04)]),
+    E05 = n_distinct(mutID[!is.na(E05)]),
+    E06 = n_distinct(mutID[!is.na(E06)]))
+
+# Transform the result to a more readable format
+L16.mutID.mutants.result_table <- tibble(
+  Treatment = L16.mutID.mutants.treatments,
+  `Unique mutID Count` = as.numeric(L16.mutID.mutants.result[1,]))
+
+# Print the table
+print(L16.mutID.mutants.result_table, n = Inf)
+```
+
+**Median Mutants per Homolog:** Calculate the median number of unique mutants (mutID) associated with unique homologs (IDalign) recovered from each sampling condition:
+```{r class.output="goodCode"}
+# Define the treatments
+L16.mutID.mutants.median.treatments <- c("LB", "M9, Full Supplement", "M9, Complementation", "M9, 0.058-TMP", 
+                "M9, 0.5-TMP", "M9, 1.0-TMP", "M9, 10-TMP", "M9, 50-TMP", "M9, 200-TMP")
+
+L16.mutID.mutants.median.sampleID <- c("D02", "D04", "D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Calculate median unique mutID (mutations > 0) per unique IDalign (mutations = 0)
+L16.mutID.mutants.median.result <- BCs16_map %>%
+  group_by(IDalign) %>%
+  summarise(
+    D02=if(any(mutations==0 & !is.na(D02))) median(n_distinct(mutID[mutations>0 & !is.na(D02)])) else NA_real_,
+    D04=if(any(mutations==0 & !is.na(D04))) median(n_distinct(mutID[mutations>0 & !is.na(D04)])) else NA_real_,
+    D12=if(any(mutations==0 & !is.na(D12))) median(n_distinct(mutID[mutations>0 & !is.na(D12)])) else NA_real_,
+    E01=if(any(mutations==0 & !is.na(E01))) median(n_distinct(mutID[mutations>0 & !is.na(E01)])) else NA_real_,
+    E02=if(any(mutations==0 & !is.na(E02))) median(n_distinct(mutID[mutations>0 & !is.na(E02)])) else NA_real_,
+    E03=if(any(mutations==0 & !is.na(E03))) median(n_distinct(mutID[mutations>0 & !is.na(E03)])) else NA_real_,
+    E04=if(any(mutations==0 & !is.na(E04))) median(n_distinct(mutID[mutations>0 & !is.na(E04)])) else NA_real_,
+    E05=if(any(mutations==0 & !is.na(E05))) median(n_distinct(mutID[mutations>0 & !is.na(E05)])) else NA_real_,
+    E06=if(any(mutations==0 & !is.na(E06))) median(n_distinct(mutID[mutations>0 & !is.na(E06)])) else NA_real_) %>%
+  summarise(across(starts_with(c("D", "E")), ~median(., na.rm = TRUE)))  # Only summarize D* and E* columns
+
+# Transform the result to a more readable format
+L16.mutID.mutants.median.result_table <- tibble(
+  SampleID = L16.mutID.mutants.median.sampleID,
+  Treatment = L16.mutID.mutants.median.treatments,
+  `Median Unique mutID per Unique IDalign` = as.numeric(L16.mutID.mutants.median.result[1,]))
+
+# Print the table
+print(L16.mutID.mutants.median.result_table, n = Inf)
+```
+
+Validate the median mutants (mutID) per homology (IDalign) for Complementation (D12):
+```{r class.output="goodCode"}
+# Calculate intermediate results
+D12_validate_result <- BCs16_map %>%
+  group_by(IDalign) %>%
+  summarise(
+    D12_mutants_count = sum(mutations > 0 & !is.na(D12)),
+    D12_non_mutants_count = sum(mutations == 0 & !is.na(D12)),
+    D12_unique_mutID_count = n_distinct(mutID[mutations > 0 & !is.na(D12)]))
+
+# Remove rows where D12_non_mutants_count == 0
+D12_filtered <- D12_validate_result %>%
+  filter(D12_non_mutants_count > 0)
+
+# Print full results showing median mutID for each IDalign in D12:
+print("Full IDalign results for D12:")
+print(D12_filtered, n = Inf)
+
+# Save a copy as a spreadsheet
+write.csv(D12_filtered, "Mutants/OUTPUT/L16.D12.median.mutID.per.IDalign.csv", row.names = FALSE)
+
+# Print summary results of median mutID per IDalign in D12:
+print("Summary of filtered results:")
+print(summary(D12_filtered))
+
+# Calculate median using the filtered data
+median_mutants_D12 <- median(D12_filtered$D12_unique_mutID_count, na.rm = TRUE)
+
+print(paste("Median number of unique mutants per IDalign for D12:", median_mutants_D12))
+```
+
+**Mutant Counts by Distance:** Summarize the raw sequence counts across mapped barcodes at numerous mutation levels:
+```{r class.output="goodCode"}
+# Define the columns we want to summarize
+L16.columns_to_summarize <- c("D02", "D04", "D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Create a function to sum values for multiple columns
+L16.sum_columns <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L16.columns_to_summarize), ~sum(., na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Sum values for each condition
+L16.summary_all <- bind_rows(
+  BCs16_map %>% filter(mutations == 0) %>% L16.sum_columns("mutations == 0"),
+  BCs16_map %>% filter(mutations == 1) %>% L16.sum_columns("mutations == 1"),
+  BCs16_map %>% filter(mutations >= 2 & mutations <= 5) %>% L16.sum_columns("mutations 2-5"),
+  BCs16_map %>% filter(mutations >= 6 & mutations <= 50) %>% L16.sum_columns("mutations 6-50"),
+  BCs16_map %>% filter(mutations >= 51 & mutations <= 100) %>% L16.sum_columns("mutations 51-100"),
+  BCs16_map %>% filter(mutations > 100) %>% L16.sum_columns("mutations > 100")
+)
+
+# Add a total row to the sum table
+L16.summary_all_with_total <- L16.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total sum for each column
+L16.summary_percentage <- L16.summary_all %>%
+  mutate(across(all_of(L16.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L16.summary_percentage_with_total <- L16.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L16.summary_all_rounded <- L16.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+L16.summary_percentage_rounded <- L16.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the sum table
+cat("Table 1: Sum of values for each condition\n")
+print(L16.summary_all_rounded, n = Inf, width = Inf)
+
+# Print the percentage table
+cat("\nTable 2: Percentage of total sum for each condition\n")
+print(L16.summary_percentage_rounded, n = Inf, width = Inf)
+
+# Optionally, save the tables to CSV files
+write.csv(L16.summary_all_rounded, "Mutants/OUTPUT/L16.sum_by_mutations_with_total.csv", row.names = FALSE)
+write.csv(L16.summary_percentage_rounded, "Mutants/OUTPUT/L16.percentage_by_mutations_with_total.csv", row.names = FALSE)
+```
+
+Calculate the sum of raw sequence reads for each treatment condition from the original `BCs16_map` object to verify sum totals in "summary_all_rounded" (above).
+```{r class.output="goodCode"}
+# Define the columns we want to summarize
+BCs16.columns_to_summarize <- c("D02", "D04", "D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Calculate the sums for each column
+BCs16.sums_table <- BCs16_map %>%
+  summarise(across(all_of(BCs16.columns_to_summarize), ~sum(., na.rm = TRUE)))
+
+# Convert to a more readable format
+BCs16.sums_table_long <- BCs16.sums_table %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Column", 
+               values_to = "Sum")
+
+# Round the sums for better readability
+BCs16.sums_table_long$Sum <- round(BCs16.sums_table_long$Sum, 2)
+
+# Print the table
+cat("Table: Sums for specified columns in BCs16_map\n")
+print(BCs16.sums_table_long, n = Inf)
+```
+
+**Piechart:** Plot the percent sums as a pie chart to show distribution of mutations in mapped barcodes:
+```{r}
+# Prepare data for the pie chart
+L16.pie_data <- L16.summary_percentage_rounded %>%
+  filter(condition != "Total") %>%  # Remove the "Total" category
+  select(condition, D12_pct) %>%
+  arrange(desc(D12_pct))  # Sort in descending order for better visualization
+
+# Ensure condition is a factor with the correct order
+L16.mutation_order <- 
+  c("mutations == 0", "mutations == 1", "mutations 2-5", "mutations 6-50", "mutations 51-100", "mutations > 100")
+
+L16.pie_data$condition <- factor(L16.pie_data$condition, levels = L16.mutation_order)
+
+# Create labels with percentages
+L16.pie_data$label <- paste0(L16.pie_data$condition, " (", round(L16.pie_data$D12_pct, 1), "%)")
+
+# Calculate the positions for the labels
+L16.pie_data <- L16.pie_data %>%
+  arrange(condition) %>%
+  mutate(
+    prop = D12_pct / sum(D12_pct),
+    ypos = cumsum(prop) - 0.5 * prop,
+    label_position = cumsum(prop) - prop / 2
+  )
+
+# Create a custom blue color palette
+L16.n_colors <- nrow(L16.pie_data)
+L16.orange_palette <- colorRampPalette(c("orange", "darkorange4"))(L16.n_colors)
+
+# Create the pie chart
+L16.pie_chart <- ggplot(L16.pie_data, aes(x = 1, y = D12_pct, fill = condition)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y", start = 0) +
+  labs(title = "Distribution of Mutation Groups \nfor Complementation (Codon 2)",
+       fill = "Mutation Group") +
+  theme_void() +
+  theme(legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)) +
+  scale_fill_manual(values = L16.orange_palette, labels = L16.pie_data$label) +
+  scale_y_continuous(labels = percent_format())
+
+# Display the pie chart
+print(L16.pie_chart)
+```
+
+```{r echo=FALSE}
+# Save the pie chart
+ggsave("Mutants/PLOTS/L16.percent_sum_D12_pie_chart_orange.png", 
+       L16.pie_chart, width = 10, height = 8, dpi = 300)
+```
+
+#### Both Codons
+
+```{r}
+patch1 <- L15.pie_chart | L16.pie_chart
+patch1
+```
+
+```{r echo=FALSE}
+# Save the pie chart
+ggsave("Mutants/PLOTS/Lib15.16.percent.sum.pie.chart.complementation.png", 
+       patch1, width = 12, height = 8, dpi = 300)
+```
+
+Plot the two percentage datasets as a boxplot showing differences in mutation groups between codon versions:
+```{r}
+# Combine the two dataframes
+L15.16.combined.summary_percentage_rounded <- bind_rows(
+  L15.summary_percentage_rounded %>% 
+    pivot_longer(cols = ends_with("_pct"), names_to = "sample", values_to = "percentage") %>% 
+    mutate(group = "Codon1"),
+  L16.summary_percentage_rounded %>% 
+    pivot_longer(cols = ends_with("_pct"), names_to = "sample", values_to = "percentage") %>% 
+    mutate(group = "Codon2")
+)
+
+# Ensure the condition column is a factor with levels in the desired order
+L15.16.combined.summary_percentage_rounded <- L15.16.combined.summary_percentage_rounded %>%
+  filter(condition != "Total") %>%
+  mutate(condition = factor(condition, levels = unique(condition)))
+
+# Create a named vector for the new labels
+L15.16.new_labels <- c(
+  "mutations == 0" = "0",
+  "mutations == 1" = "1",
+  "mutations 2-5" = "2-5",
+  "mutations 6-50" = "6-50",
+  "mutations 51-100" = "51-100",
+  "mutations > 100" = ">100"
+)
+
+# Create barplot of percentages
+L15.16.combined.summary_percentage.plot <- 
+  ggplot(L15.16.combined.summary_percentage_rounded, aes(x = condition, y = percentage, fill = group)) +
+  stat_summary(fun = mean, geom = "bar", position = position_dodge(width = 0.9), width = 0.8) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", position = position_dodge(width = 0.9), width = 0.2) +
+  theme_minimal() + 
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5), 
+        plot.title = element_text(size = 14, hjust = 0.5), 
+        axis.text.x = element_text(size = 12), 
+        axis.text.y = element_text(size = 12), 
+        panel.background = element_blank(), 
+        axis.title.x = element_text(size = 14), 
+        axis.title.y = element_text(size = 14),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = "bottom") +
+  labs(x = "Mutation Distance from Homolog (a.a.)", y = "Median Percentage (%)", fill = "Codon",
+       title = "Mean Mutation Percentages for both Codon Versions") +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00")) +  # Custom colors
+  coord_cartesian(ylim = c(0, 100)) +  # Set y-axis limits from 0 to 100%
+  scale_x_discrete(labels = L15.16.new_labels) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100))
+
+print(L15.16.combined.summary_percentage.plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.percentage.mutants.per.distance.group.png", 
+       plot=L15.16.combined.summary_percentage.plot,
+       dpi=600, width = 6, height = 5, units = "in")
+```
+
+Plot together:
+```{r}
+patch11 <- (L15.pie_chart | L16.pie_chart) / 
+           L15.16.combined.summary_percentage.plot +
+           plot_layout(heights = c(1, 1))
+patch11
+```
+
+```{r echo=FALSE}
+# Save the pie chart
+ggsave("Mutants/PLOTS/Lib15.16.Piecharts.Summary.Complementation.png", 
+       patch11, width = 8, height = 8, dpi = 300)
+```
+
+### Filter Data by Distance
+
+Grab only the BCs with up to 5 mutations (also need to ensure it has greater than 0 mutations since some BCs have negative values):
+```{r}
+BCs5_15 <- BCs15_map %>%
+  filter(mutations >= 0 & mutations <= 5) %>%
+  left_join(mutIDinfo15 %>% select(mutID), by="mutID") %>%
+  select(BC,IDalign,mutID,mutations,D05D03fc)
+```
+
+Retain only the homologs with good data (>5BCs):
+```{r}
+fitness_distance_15 <- perfects_15_16_5BCs_tree %>%
+  select(ID,fitD05D03) %>%
+  dplyr::rename(IDalign=ID)
+```
+
+Determine median and sd for 1 mutation:
+```{r}
+fitness_distance_15 <- BCs5_15 %>%
+    filter(mutations==1) %>%
+    group_by(IDalign) %>%
+    summarise(mut1fit=median(D05D03fc),
+              mut1sd=sd(D05D03fc),
+              num1points=n()) %>%
+    right_join(fitness_distance_15,by="IDalign")
+```
+
+Determine median and sd for 2 mutation:
+```{r}
+fitness_distance_15 <-  BCs5_15 %>%
+  filter(mutations==2) %>%
+  group_by(IDalign) %>%
+  summarise(mut2fit=median(D05D03fc),
+            mut2sd=sd(D05D03fc),
+            num2points=n()) %>%
+  right_join(fitness_distance_15,by="IDalign") 
+```
+
+Determine median and sd for 3 mutations:
+```{r}
+fitness_distance_15 <-  BCs5_15 %>%
+  filter(mutations==3) %>%
+  group_by(IDalign) %>%
+  summarise(mut3fit=median(D05D03fc),
+            mut3sd=sd(D05D03fc),
+            num3points=n()) %>%
+  right_join(fitness_distance_15,by="IDalign")
+```
+
+Determine median and sd for 4 mutations:
+```{r}
+fitness_distance_15 <-  BCs5_15 %>%
+  filter(mutations==4) %>%
+  group_by(IDalign) %>%
+  summarise(mut4fit=median(D05D03fc),
+            mut4sd=sd(D05D03fc),
+            num4points=n()) %>%
+  right_join(fitness_distance_15,by="IDalign")
+```
+
+Determine median and sd for 5 mutations:
+```{r}
+fitness_distance_15 <-  BCs5_15 %>%
+  filter(mutations==5) %>%
+  group_by(IDalign) %>%
+  summarise(mut5fit=median(D05D03fc),
+            mut5sd=sd(D05D03fc),
+            num5points=n()) %>%
+  right_join(fitness_distance_15,by="IDalign")
+```
+
+Determine change in fitness:
+```{r}
+fitness_distance_nu_15 <- fitness_distance_15 %>%
+  mutate(mut1fitn=(mut1fit-fitD05D03),
+         mut2fitn=(mut2fit-fitD05D03),
+         mut3fitn=(mut3fit-fitD05D03),
+         mut4fitn=(mut4fit-fitD05D03),
+         mut5fitn=(mut5fit-fitD05D03),
+         mut0fitn=0)
+```
+
+Melt data on number of mutations:
+```{r}
+fitness_distance_m_15 <- fitness_distance_nu_15 %>%
+  select(IDalign,fitD05D03,mut0fitn,mut1fitn,mut2fitn,mut3fitn,mut4fitn,mut5fitn) %>%
+  gather(mutations,fitness,mut0fitn,mut1fitn,mut2fitn,mut3fitn,mut4fitn,mut5fitn)
+```
+
+Replace names with numbers:
+```{r}
+fitness_distance_m_15$mutations[which(fitness_distance_m_15$mutations=="mut0fitn")] <- as.numeric(0)
+fitness_distance_m_15$mutations[which(fitness_distance_m_15$mutations=="mut1fitn")] <- as.numeric(1)
+fitness_distance_m_15$mutations[which(fitness_distance_m_15$mutations=="mut2fitn")] <- as.numeric(2)
+fitness_distance_m_15$mutations[which(fitness_distance_m_15$mutations=="mut3fitn")] <- as.numeric(3)
+fitness_distance_m_15$mutations[which(fitness_distance_m_15$mutations=="mut4fitn")] <- as.numeric(4)
+fitness_distance_m_15$mutations[which(fitness_distance_m_15$mutations=="mut5fitn")] <- as.numeric(5)
+```
+
+Remove those with NA fitness:
+```{r}
+fitness_distance_m_15 <- fitness_distance_m_15 %>%
+  filter(!is.na(fitness))
+```
+
+### Fitness vs. Distance Plots
+
+The first plot version uses traces to display results:
+```{r}
+lib15_fit_dist_5muts_line <- ggplot(fitness_distance_m_15, aes(x=mutations, y=fitness, group=IDalign, color=IDalign)) +
+  geom_point() +
+  geom_line() +
+  xlab("Distance from homolog (a.a.)") +
+  ylab("Change in fitness relative to homolog") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+
+lib15_fit_dist_5muts_line
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.fitness.vs.distance.all.traces.5aa.muts.scatter.png", 
+       plot=lib15_fit_dist_5muts_line,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+The second plot version uses a boxplot to display results:
+```{r}
+lib15_fit_dist_5muts_boxplot <- ggplot(fitness_distance_m_15, aes(x=mutations, y=fitness)) +
+  geom_boxplot(color="black", fill="#0072B2", alpha=0.8) +
+  xlab("Distance from homolog (a.a.)") +
+  ylab("Change in fitness relative to homolog") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-10,10))
+
+lib15_fit_dist_5muts_boxplot
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.fitness.vs.distance.all.traces.5aa.muts.boxplot.png", 
+       plot=lib15_fit_dist_5muts_boxplot,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+Calculate Spearman correlations between fitness and distance from homolog:
+```{r, warning=FALSE, class.output="goodCode"}
+# Calculate Spearman coefficient:
+cor(as.numeric(fitness_distance_m_15$mutations),fitness_distance_m_15$fitness,
+    method=c("spearman"))
+
+# Run correlation test:
+cor.test(as.numeric(fitness_distance_m_15$mutations),fitness_distance_m_15$fitness,
+         method=c("spearman"))
+```
+
+## Plot Mutants per Homolog
+<font color="blue">**This section is based on the R file: "R_plot_all_mutants.R".**</font> It describes how to plot all mutants per homolog independently.
+
+Determine the number of mutants per homolog:
+```{r}
+# Lib15
+mutantsperhomolog15 <- mutIDinfo15 %>%
+  filter(mutations != 0) %>%
+  select(mutID,IDalign) %>%
+  distinct() %>%
+  group_by(IDalign) %>%
+  summarise(count=n())
+
+# Lib16
+mutantsperhomolog16 <- mutIDinfo16 %>%
+  filter(mutations != 0) %>%
+  select(mutID,IDalign) %>%
+  distinct() %>%
+  group_by(IDalign) %>%
+  summarise(count=n())
+```
+
+Add a column and label each ID for the library it comes from to keep track of the data source:
+```{r}
+# Lib15
+mutantsperhomolog15$lib <- "Lib15"
+
+# Lib16
+mutantsperhomolog16$lib <- "Lib16"
+```
+
+Combine both library datasets for plotting:
+```{r}
+mutantsperhomolog_15_16 <- bind_rows(mutantsperhomolog15, mutantsperhomolog16, .id = "library")
+```
+
+Plot the mutant count for both libraries:
+```{r}
+mutantsperhomolog_15_16_plot <- ggplot(mutantsperhomolog_15_16, aes(x = library, y = count, fill = library)) +
+  geom_violin(color = "black", alpha = 0.75) +
+  xlab("Library") +
+  ylab("Mutants per homolog") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 600)) +
+  scale_fill_manual(values = c("#0072B2", "#E69F00")) +
+  scale_x_discrete(labels = c("Library 15", "Library 16"))
+
+mutantsperhomolog_15_16_plot
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.mutants.per.homolog.violin.png", plot=mutantsperhomolog_15_16_plot,
+       dpi=600, width = 6, height = 6, units = "in")
+```
+
+Calculate the median mutant counts for each distinct homolog:
+```{r class.output="goodCode"}
+#Lib15
+
+#Median mutant count per homolog
+median(mutantsperhomolog15$count)
+
+#Lib16
+
+#Median mutant count per homolog
+median(mutantsperhomolog16$count)
+```
+
+Calculate the mean mutant counts for each distinct homolog:
+```{r class.output="goodCode"}
+#Lib15
+
+#Mean mutant count per homolog
+mean(mutantsperhomolog15$count)
+
+#Lib16
+
+#Mean mutant count per homolog
+mean(mutantsperhomolog16$count)
+```
+
+<font color="green">If both measures (mean and median) are considerably different, this indicates that the data are skewed (i.e. they are far from being normally distributed) and the **MEDIAN** generally gives a more appropriate idea of the data distribution.</font>
+
+### Homologs w/ Most Mutants
+
+Determine the top 10 homologs with the greatest number of unique mutants. Arrange by counts (greatest to least):
+```{r}
+#Lib15
+mutantsperhomolog15 <- mutantsperhomolog15 %>%
+  arrange(-count)
+
+#Lib16
+mutantsperhomolog16 <- mutantsperhomolog16 %>%
+  arrange(-count)
+```
+
+<font color="green">**Select the top 10 homologs based on greatest mutant counts**</font>
+```{r echo=FALSE}
+#Lib15
+
+# Display dataframe with kable formatting
+mutantsperhomolog15_10.count <- head(mutantsperhomolog15, 10)
+
+knitr::kable(mutantsperhomolog15_10.count,
+  col.names = c('ID Align', 'Count', 'Library'),
+  align = "lll",
+  format.args = list(big.mark = ","))
+
+#Lib16
+
+# Display dataframe with kable formatting
+mutantsperhomolog16_10.count <- head(mutantsperhomolog16, 10)
+
+knitr::kable(mutantsperhomolog16_10.count,
+  col.names = c('ID Align', 'Count', 'Library'),
+  align = "lll",
+  format.args = list(big.mark = ","))
+```
+
+Make keys for plotting:
+```{r}
+#Lib15
+
+mutantsperhomolog15$key <- 1:length(mutantsperhomolog15$count)
+
+mutantsperhomolog15_10 <- mutantsperhomolog15 %>%
+  filter(key<11)
+
+mutantsdist15 <- mutIDinfo15 %>%
+  filter(IDalign %in% mutantsperhomolog15_10$IDalign) %>%
+  filter(mutations>-1)
+
+#Lib16
+
+mutantsperhomolog16$key <- 1:length(mutantsperhomolog16$count)
+
+mutantsperhomolog16_10 <- mutantsperhomolog16 %>%
+  filter(key<11)
+
+mutantsdist16 <- mutIDinfo16 %>%
+  filter(IDalign %in% mutantsperhomolog16_10$IDalign) %>%
+  filter(mutations>-1)
+```
+
+Plot the top 10 homologs with the greatest number of mutants. Calculate mean mutants and SD based on total counts:
+```{r}
+Lib15_top10_muts <- ggplot(mutantsdist15, aes(x=IDalign, y=mutations))+
+  geom_boxplot(color="black", fill="#0072B2", alpha=0.75) +
+  ggtitle("Library 15") +
+  xlab("") +
+  ylab("Distribution of Mutants at Distance (a.a.)") +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+
+Lib15_top10_muts
+```
+
+```{r}
+Lib16_top10_muts <- ggplot(mutantsdist16, aes(x=IDalign, y=mutations))+
+  geom_boxplot(color="black", fill="#E69F00") +
+  ggtitle("Library 16") +
+  xlab("") +
+  ylab("Distribution of Mutants at Distance (a.a.)") +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+
+Lib16_top10_muts
+```
+
+```{r}
+patch2 <- (Lib15_top10_muts | Lib16_top10_muts)
+patch2
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.mutants.at.distance.top10.png", plot=patch2,
+       dpi=600, width = 16, height = 12, units = "in")
+```
+
+## Mutant Fitness
+
+### Homolog Mutant Counts
+
+Summarize the number of unique "IDalign" recovered in the `mutIDinfo` object with 0 mutations, 0+1 mutations, 0+1+2 mutations, 0+1+2+3 mutations, 0+1+2+3+4 mutations, and 0+1+2+3+4+5 mutations that can complement DHFR function (fitness > -1). Also, only retain perfects (mutations = 0) if numprunedBCs > 5. Ignore numprunedBCs for mutations = 1,2,3,4,5:
+
+#### Lib15
+```{r class.output="goodCode"}
+# Unique IDalign with 0 mutations for Complementation (fitD05D03)
+Lib15.mut.0.result <- mutIDinfo15 %>%
+  filter(!is.na(fitD05D03) & 
+         fitD05D03 >= -1 & 
+         mutations == 0 &
+         numprunedBCs >= 5) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.mut.0.result)
+
+# Unique IDalign with 0+1 mutations for Complementation (fitD05D03)
+Lib15.mut.0.1.result <- mutIDinfo15 %>%
+  filter(!is.na(fitD05D03) & 
+         fitD05D03 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | mutations == 1)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.mut.0.1.result)
+
+# Unique IDalign with 0+1+2 mutations for Complementation (fitD05D03)
+Lib15.mut.0.1.2.result <- mutIDinfo15 %>%
+  filter(!is.na(fitD05D03) & 
+         fitD05D03 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.mut.0.1.2.result)
+
+# Unique IDalign with 0+1+2+3 mutations for Complementation (fitD05D03)
+Lib15.mut.0.1.2.3.result <- mutIDinfo15 %>%
+  filter(!is.na(fitD05D03) & 
+         fitD05D03 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2 |
+          mutations == 3)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.mut.0.1.2.3.result)
+
+# Unique IDalign with 0+1+2+3+4 mutations for Complementation (fitD05D03)
+Lib15.mut.0.1.2.3.4.result <- mutIDinfo15 %>%
+  filter(!is.na(fitD05D03) & 
+         fitD05D03 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2 |
+          mutations == 3 |
+          mutations == 4)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.mut.0.1.2.3.4.result)
+
+# Unique IDalign with 0+1+2+3+4+5 mutations for Complementation (fitD05D03)
+Lib15.mut.0.1.2.3.4.5.result <- mutIDinfo15 %>%
+  filter(!is.na(fitD05D03) & 
+         fitD05D03 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2 |
+          mutations == 3 |
+          mutations == 4 |
+          mutations == 5)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.mut.0.1.2.3.4.5.result)
+```
+
+#### Lib16
+```{r class.output="goodCode"}
+# Unique IDalign with 0 mutations for Complementation (fitD12D04)
+Lib16.mut.0.result <- mutIDinfo16 %>%
+  filter(!is.na(fitD12D04) & 
+         fitD12D04 >= -1 & 
+         mutations == 0 &
+         numprunedBCs >= 5) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib16.mut.0.result)
+
+# Unique IDalign with 0+1 mutations for Complementation (fitD12D04)
+Lib16.mut.0.1.result <- mutIDinfo16 %>%
+  filter(!is.na(fitD12D04) & 
+         fitD12D04 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | mutations == 1)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib16.mut.0.1.result)
+
+# Unique IDalign with 0+1+2 mutations for Complementation (fitD12D04)
+Lib16.mut.0.1.2.result <- mutIDinfo16 %>%
+  filter(!is.na(fitD12D04) & 
+         fitD12D04 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib16.mut.0.1.2.result)
+
+# Unique IDalign with 0+1+2+3 mutations for Complementation (fitD12D04)
+Lib16.mut.0.1.2.3.result <- mutIDinfo16 %>%
+  filter(!is.na(fitD12D04) & 
+         fitD12D04 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2 |
+          mutations == 3)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib16.mut.0.1.2.3.result)
+
+# Unique IDalign with 0+1+2+3+4 mutations for Complementation (fitD12D04)
+Lib16.mut.0.1.2.3.4.result <- mutIDinfo16 %>%
+  filter(!is.na(fitD12D04) & 
+         fitD12D04 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2 |
+          mutations == 3 |
+          mutations == 4)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib16.mut.0.1.2.3.4.result)
+
+# Unique IDalign with 0+1+2+3+4+5 mutations for Complementation (fitD12D04)
+Lib16.mut.0.1.2.3.4.5.result <- mutIDinfo16 %>%
+  filter(!is.na(fitD12D04) & 
+         fitD12D04 >= -1 & 
+         ((mutations == 0 & numprunedBCs >= 5) | 
+          mutations == 1 | 
+          mutations == 2 |
+          mutations == 3 |
+          mutations == 4 |
+          mutations == 5)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib16.mut.0.1.2.3.4.5.result)
+```
+
+#### Combined Codons
+
+Filter both mutIDinfo datasets to retain only the relevant columns prior to merging:
+```{r}
+# Lib15
+mutIDinfo15.subset <- mutIDinfo15 %>%
+  filter(mutations <= 5,
+         fitD05D03 >= -1,
+         (mutations != 0 | (mutations == 0 & numprunedBCs >= 5))) %>%
+  select(mutID, IDalign, numprunedBCs, mutations, fitD05D03)
+
+# Lib16
+mutIDinfo16.subset <- mutIDinfo16 %>%
+  filter(mutations <= 5,
+         fitD12D04 >= -1,
+         (mutations != 0 | (mutations == 0 & numprunedBCs >= 5))) %>%
+  select(mutID, IDalign, numprunedBCs, mutations, fitD12D04)
+```
+
+Combine the shared mutIDs between datasets:
+```{r}
+mutIDinfo15.16.shared.subset <- inner_join(mutIDinfo15.subset, mutIDinfo16.subset, by = "mutID", suffix = c(".15", ".16"))
+```
+
+Combine the unique mutIDs between datasets:
+```{r}
+# Rows unique to mutIDinfo15.subset
+mutIDinfo.unique_to_15 <- anti_join(mutIDinfo15.subset, mutIDinfo16.subset, by = "mutID")
+
+# Rows unique to mutIDinfo16.subset
+mutIDinfo.unique_to_16 <- anti_join(mutIDinfo16.subset, mutIDinfo15.subset, by = "mutID")
+
+# Combine the unique rows
+mutIDinfo.15.16.unique.subset <- bind_rows(
+  mutIDinfo.unique_to_15 %>% mutate(source = "Lib15"),
+  mutIDinfo.unique_to_16 %>% mutate(source = "Lib16"))
+```
+
+Mutations = 0: Count the number of unique IDalign in the shared and unique datasets:
+```{r class.output="goodCode"}
+# Shared: Unique IDalign with 0 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.shared.result <- mutIDinfo15.16.shared.subset %>%
+  filter(mutations.15 == 0 | mutations.16 == 0) %>%
+  distinct(IDalign.15, IDalign.16) %>%
+  nrow()
+
+print(Lib15.16.mut.0.shared.result)
+
+# Unique: Unique IDalign with 0 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.unique.result <- mutIDinfo.15.16.unique.subset %>%
+  filter(mutations == 0) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.16.mut.0.unique.result)
+
+# Sum of both Codon version for 0 mutations
+Lib15.16.mut.0.shared.unique.result <- Lib15.16.mut.0.shared.result + Lib15.16.mut.0.unique.result
+
+print(Lib15.16.mut.0.shared.unique.result)
+```
+
+Mutations = 0+1: Count the number of unique IDalign in the shared and unique datasets:
+```{r class.output="goodCode"}
+# Shared: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.shared.result <- mutIDinfo15.16.shared.subset %>%
+  filter(mutations.15 %in% c(0, 1) | mutations.16 %in% c(0, 1)) %>%
+  distinct(IDalign.15, IDalign.16) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.shared.result)
+
+# Unique: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.unique.result <- mutIDinfo.15.16.unique.subset %>%
+  filter(mutations %in% c(0, 1)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.unique.result)
+
+# Sum of both Codon versions for 0 or 1 mutations
+Lib15.16.mut.0.1.shared.unique.result <- Lib15.16.mut.0.1.shared.result + Lib15.16.mut.0.1.unique.result
+
+print(Lib15.16.mut.0.1.shared.unique.result)
+```
+
+Mutations = 0+1+2: Count the number of unique IDalign in the shared and unique datasets:
+```{r class.output="goodCode"}
+# Shared: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.shared.result <- mutIDinfo15.16.shared.subset %>%
+  filter(mutations.15 %in% c(0, 1, 2) | mutations.16 %in% c(0, 1, 2)) %>%
+  distinct(IDalign.15, IDalign.16) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.shared.result)
+
+# Unique: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.unique.result <- mutIDinfo.15.16.unique.subset %>%
+  filter(mutations %in% c(0, 1, 2)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.unique.result)
+
+# Sum of both Codon versions for 0 or 1 mutations
+Lib15.16.mut.0.1.2.shared.unique.result <- Lib15.16.mut.0.1.2.shared.result + Lib15.16.mut.0.1.2.unique.result
+
+print(Lib15.16.mut.0.1.2.shared.unique.result)
+```
+
+Mutations = 0+1+2+3: Count the number of unique IDalign in the shared and unique datasets:
+```{r class.output="goodCode"}
+# Shared: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.3.shared.result <- mutIDinfo15.16.shared.subset %>%
+  filter(mutations.15 %in% c(0, 1, 2, 3) | mutations.16 %in% c(0, 1, 2, 3)) %>%
+  distinct(IDalign.15, IDalign.16) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.3.shared.result)
+
+# Unique: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.3.unique.result <- mutIDinfo.15.16.unique.subset %>%
+  filter(mutations %in% c(0, 1, 2, 3)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.3.unique.result)
+
+# Sum of both Codon versions for 0 or 1 mutations
+Lib15.16.mut.0.1.2.3.shared.unique.result <- Lib15.16.mut.0.1.2.3.shared.result + Lib15.16.mut.0.1.2.3.unique.result
+
+print(Lib15.16.mut.0.1.2.3.shared.unique.result)
+```
+
+Mutations = 0+1+2+3+4: Count the number of unique IDalign in the shared and unique datasets:
+```{r class.output="goodCode"}
+# Shared: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.3.4.shared.result <- mutIDinfo15.16.shared.subset %>%
+  filter(mutations.15 %in% c(0, 1, 2, 3, 4) | mutations.16 %in% c(0, 1, 2, 3, 4)) %>%
+  distinct(IDalign.15, IDalign.16) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.3.4.shared.result)
+
+# Unique: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.3.4.unique.result <- mutIDinfo.15.16.unique.subset %>%
+  filter(mutations %in% c(0, 1, 2, 3, 4)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.3.4.unique.result)
+
+# Sum of both Codon versions for 0 or 1 mutations
+Lib15.16.mut.0.1.2.3.4.shared.unique.result <- Lib15.16.mut.0.1.2.3.4.shared.result + Lib15.16.mut.0.1.2.3.4.unique.result
+
+print(Lib15.16.mut.0.1.2.3.4.shared.unique.result)
+```
+
+Mutations = 0+1+2+3+4+5: Count the number of unique IDalign in the shared and unique datasets:
+```{r class.output="goodCode"}
+# Shared: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.3.4.5.shared.result <- mutIDinfo15.16.shared.subset %>%
+  filter(mutations.15 %in% c(0, 1, 2, 3, 4, 5) | mutations.16 %in% c(0, 1, 2, 3, 4, 5)) %>%
+  distinct(IDalign.15, IDalign.16) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.3.4.5.shared.result)
+
+# Unique: Unique IDalign with 0 or 1 mutations for Complementation (fitD05D03 and fitD12D04)
+Lib15.16.mut.0.1.2.3.4.5.unique.result <- mutIDinfo.15.16.unique.subset %>%
+  filter(mutations %in% c(0, 1, 2, 3, 4, 5)) %>%
+  distinct(IDalign) %>%
+  nrow()
+
+print(Lib15.16.mut.0.1.2.3.4.5.unique.result)
+
+# Sum of both Codon versions for 0 or 1 mutations
+Lib15.16.mut.0.1.2.3.4.5.shared.unique.result <- Lib15.16.mut.0.1.2.3.4.5.shared.result + Lib15.16.mut.0.1.2.3.4.5.unique.result
+
+print(Lib15.16.mut.0.1.2.3.4.5.shared.unique.result)
+```
+
+#### Plot Codon Mutants
+
+Organize the codon homolog + mutant counts into a new dataframe:
+```{r class.output="goodCode"}
+Lib15.16.homolog.mutants <- tibble(
+  Mutations = c(0, 1, 2, 3, 4, 5),
+  Codon1 = c(417, 644, 665, 679, 685, 688),
+  Codon2 = c(377, 568, 597, 602, 604, 605),
+  Both = c(600, 1053, 1082, 1093, 1098, 1099))
+
+# View the data frame
+print(Lib15.16.homolog.mutants)
+```
+
+```{r}
+# Reshape the data from wide to long format
+Lib15.16.homolog.mutants_long <- Lib15.16.homolog.mutants %>%
+  pivot_longer(cols = c(Codon1, Codon2, Both), 
+               names_to = "Category", 
+               values_to = "Assemblies")
+
+# Set the maximum value for scaling to 1208
+max_assemblies <- 1208
+
+# Create the plot with smoothed lines and second y-axis
+Lib15.16.homolog.mutants_plot <- ggplot(Lib15.16.homolog.mutants_long,
+                                        aes(x = Mutations, y = Assemblies, color = Category)) +
+  geom_line(size = 1) +
+  geom_point(size = 7) +
+  scale_color_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00", "Both" = "lightblue4"),
+                     breaks = c("Codon1", "Codon2", "Both")) +  # This line sets the legend order
+  scale_y_continuous(
+    name = "Homologs Represented \n(1208 Assembled)", 
+    limits = c(0, max_assemblies),
+    expand = c(0, 0),
+    sec.axis = sec_axis(~ . * 100 / max_assemblies, 
+                        name = "Library Representation (%)", 
+                        breaks = seq(0, 100, by = 20))
+  ) +
+  labs(x = "Max. Distance from Homolog (a.a.)",
+       color = "Category") +
+  theme_minimal() +
+  theme(
+    axis.title.y.right = element_text(size = 24, color = "red"),
+    axis.text.y.right = element_text(size = 21, color = "red"),
+    axis.title.x = element_text(size = 21),
+    axis.text.x = element_text(size = 21),
+    axis.title.y = element_text(size = 24),
+    axis.text.y = element_text(size = 21),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 20),
+    legend.position = "bottom",
+    axis.line = element_line(color = "black", size = 1.0),
+    axis.ticks = element_line(color = "black", size = 1.0),
+    axis.ticks.length = unit(0.2, "cm")
+  ) +
+  coord_cartesian(ylim = c(0, max_assemblies * 1.05))  # Add 5% padding to the top
+
+# Display the plot
+print(Lib15.16.homolog.mutants_plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/DHFR.Lib15.16.homologs.mutants.complement.linechart.png", 
+       plot=Lib15.16.homolog.mutants_plot,
+       dpi=600, width = 7, height = 7, units = "in")
+```
+
+## Mutants Only
+
+First, create a `mutant` object that filters the `mutIDinfo` object to retain mutIDs only if they have > 0 mutations:
+```{r}
+# Lib15
+mutants15 <- mutIDinfo15 %>%
+  filter(mutations!=0) %>%
+  dplyr::rename(ID = IDalign)
+
+# Lib16
+mutants16 <- mutIDinfo16 %>%
+  filter(mutations!=0) %>%
+  dplyr::rename(ID = IDalign)
+```
+
+Add the actual pct_ident to E. coli score from the `orginfo` object
+```{r}
+# Lib15
+mutants15 <- merge(mutants15, orginfo[, c("ID", "PctIdentEcoli")], by = "ID", all.x = TRUE)
+
+# Lib16
+mutants16 <- merge(mutants16, orginfo[, c("ID", "PctIdentEcoli")], by = "ID", all.x = TRUE)
+```
+
+**Count the number of unique mutIDs:**
+```{r class.output="goodCode"}
+# Lib15
+mutants15.count <- length(unique(mutants15$mutID))
+format(mutants15.count, big.mark = ",")
+
+# Lib16
+mutants16.count <- length(unique(mutants16$mutID))
+format(mutants16.count, big.mark = ",")
+```
+
+**Now, count the number of unique IDaligns that each mutID is associated with:**
+```{r class.output="goodCode"}
+# Lib15
+mutants15.ID.count <- length(unique(mutants15$ID))
+format(mutants15.ID.count, big.mark = ",")
+
+# Lib16
+mutants16.ID.count <- length(unique(mutants16$ID))
+format(mutants16.ID.count, big.mark = ",")
+```
+
+Bin mutants by the percent similarity to their designed homologs:
+```{r}
+#Lib15
+mutants15$identbins <- cut(mutants15$pct_ident,
+                         breaks = seq(0,1.005,1/100),
+                         labels=as.character(seq(0.005,0.995,1/100)))
+
+#Lib16
+mutants16$identbins <- cut(mutants16$pct_ident,
+                         breaks = seq(0,1.005,1/100),
+                         labels=as.character(seq(0.005,0.995,1/100)))
+```
+
+Determine the **minimum** percent similarity mutant in the dataset (most different from designed homolog):
+```{r class.output="goodCode"}
+#Lib15
+min(mutants15$pct_ident)
+
+#Lib16
+min(mutants16$pct_ident)
+```
+
+Determine the **maximum** percent similarity mutant in the dataset (most similar to designed homolog):
+```{r class.output="goodCode"}
+#Lib15
+max(mutants15$pct_ident)
+
+#Lib16
+max(mutants16$pct_ident)
+```
+
+Calculate the total number of mutants with at least 1 barcode recovered:
+```{r class.output="goodCode"}
+#Lib15
+mut15.1BCs.count <- nrow(mutants15 %>% filter(numprunedBCs >= 1))
+format(mut15.1BCs.count, big.mark = ",")
+
+#Lib16
+mut16.1BCs.count <- nrow(mutants16 %>% filter(numprunedBCs >= 1))
+format(mut16.1BCs.count, big.mark = ",")
+```
+
+Calculate the total number of mutants with at least 5 barcode recovered:
+```{r class.output="goodCode"}
+#Lib15
+mut15.5BCs.count <- nrow(mutants15 %>% filter(numprunedBCs >= 5))
+format(mut15.5BCs.count, big.mark = ",")
+
+#Lib16
+mut16.5BCs.count <- nrow(mutants16 %>% filter(numprunedBCs >= 5))
+format(mut16.5BCs.count, big.mark = ",")
+```
+
+### Histogram Plots
+
+Plot these mutants (>1 BCs recovered) with histograms:
+```{r warning=FALSE}
+#Lib15
+mutant_hist15_plot <- mutants15 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=pct_ident, y=fitD05D03)) +
+  labs(x = "Fractional Sequence Identity", y ="Fitness",color="") +
+  geom_point(alpha=0.3,color='#0072B2') +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+
+mutant_hist15_plot2 <- ggMarginal(mutant_hist15_plot, type = "histogram", fill = "#0072B2", bins=40)
+mutant_hist15_plot2
+```
+
+```{r echo=FALSE}
+#Lib15
+ggsave(file="Mutants/PLOTS/Lib15.mutants.pctsimhomo.fitD05D03.min1BCs.png", 
+       plot=mutant_hist15_plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+
+```{r warning=FALSE}
+#Lib16
+mutant_hist16_plot <- mutants16 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=pct_ident, y=fitD12D04)) +
+  labs(x = "Fractional Sequence Identity", y ="Fitness",color="") +
+  geom_point(alpha=0.3,color='#E69F00') +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+
+mutant_hist16_plot2 <- ggMarginal(mutant_hist16_plot, type = "histogram", fill = "#E69F00", bins=40)
+mutant_hist16_plot2
+```
+
+```{r echo=FALSE}
+#Lib16
+ggsave(file="Mutants/PLOTS/Lib16.mutants.pctsimhomo.fitD05D03.min1BCs.png", 
+       plot=mutant_hist16_plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+### Boxplots
+
+Plot boxplots based on mutant percent similarity to their designed homologs for fitness between M9 (No Supp) vs. M9 (Full Supp)
+```{r warning=FALSE}
+#Lib15
+mutant_box15_plot <- mutants15 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=as.numeric(as.character(identbins))*100,y=fitD05D03,color=identbins)) +
+  labs(x = "Sequence Identity to Homolog (%)", y ="Fitness",color="") +
+  ggtitle("Lib15: Complementation") +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-10,5))
+
+mutant_box15_plot
+```
+
+```{r warning=FALSE}
+#Lib16
+mutant_box16_plot <- mutants16 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=as.numeric(as.character(identbins))*100,y=fitD12D04,color=identbins)) +
+  labs(x = "Sequence Identity to Homolog (%)", y ="Fitness",color="") +
+  ggtitle("Lib16: Complementation") +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-10,5))
+
+mutant_box16_plot
+```
+
+```{r}
+patch3 <- (mutant_box15_plot | mutant_box16_plot)
+patch3
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.mutants.by.seq.ident.min1BC.Complementation.png", 
+       plot=patch3,
+       dpi=600, width = 18, height = 8, units = "in")
+```
+
+Plot boxplots based on mutant percent similarity to their designed homologs for fitness between 50 ug/ml TMP
+```{r}
+#Lib15
+mutant_box15_50tmp <- mutants15 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=as.numeric(as.character(identbins))*100,y=fitD10D03,color=identbins)) +
+  labs(x = "Sequence Identity to Homolog (%)", y ="Fitness",color="") +
+  ggtitle("Lib15: 50 TMP") +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-15,10))
+
+mutant_box15_50tmp
+```
+
+```{r}
+#Lib16
+mutant_box16_50tmp <- mutants16 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=as.numeric(as.character(identbins))*100,y=fitE05D04,color=identbins)) +
+  labs(x = "Sequence Identity to Homolog (%)", y ="Fitness",color="") +
+  ggtitle("Lib16: 50 TMP") +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-15,10))
+
+mutant_box16_50tmp
+```
+
+```{r}
+patch4 <- (mutant_box15_50tmp | mutant_box16_50tmp)
+patch4
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.mutants.by.seq.ident.min1BC.50TMP.png", 
+       plot=patch4,
+       dpi=600, width = 18, height = 12, units = "in")
+```
+
+Plot boxplots based on mutant percent similarity to their designed homologs for fitness between 200 ug/ml TMP
+```{r}
+#Lib15
+mutant_box15_200tmp <- mutants15 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=as.numeric(as.character(identbins))*100,y=fitD11D03,color=identbins)) +
+  labs(x = "Sequence Identity to Homolog (%)", y ="Fitness",color="") +
+  ggtitle("Lib15: 200 TMP") +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-15,10))
+
+mutant_box15_200tmp
+```
+
+```{r}
+#Lib16
+mutant_box16_200tmp <- mutants16 %>%
+  filter(numprunedBCs >= 1) %>%
+  ggplot(aes(x=as.numeric(as.character(identbins))*100,y=fitE06D04,color=identbins)) +
+  labs(x = "Sequence Identity to Homolog (%)", y ="Fitness",color="") +
+  ggtitle("Lib16: 200 TMP") +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-15,10))
+
+mutant_box16_200tmp
+```
+
+```{r}
+patch5 <- (mutant_box15_200tmp | mutant_box16_200tmp)
+patch5
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.mutants.by.seq.ident.min1BC.200TMP.png",
+       plot=patch5,
+       dpi=600, width = 18, height = 8, units = "in")
+```
+
+Combine them all:
+```{r}
+patch6 <- (mutant_box15_plot | mutant_box16_plot) / (mutant_box15_50tmp | mutant_box16_50tmp) / (mutant_box15_200tmp | mutant_box16_200tmp)
+patch6
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.16.mutants.by.seq.ident.min1BC.All.Combined.png",
+       plot=patch6,
+       dpi=600, width = 12, height = 14, units = "in")
+```
+
+## Collapse Mutants
+<font color="blue">**This section is based on the R file: "R_collapse_mutants.R".**</font> The following code describes how to collapse mutant BCs onto their designed homologs within a distance of 5 amino acids.
+
+### Lib15
+
+Begin by selecting all mutants within a distance of 5 AA from their designed homologs
+```{r}
+mut_collapse_15 <- mutants15 %>%
+  filter(mutations >= 0 & mutations < 6) %>%
+  group_by(ID)
+```
+
+Merge these mutants with their designed homologs (perfects >5BCs) if they have a matching "ID". Use the shared perfects mutIDs for merging and downstream library comparisons:
+```{r}
+# Add perfects to mut_collapse by shared columns:
+mut_collapse_15 <- full_join(mut_collapse_15, perfects15_5BCs)
+```
+
+Only retain mutIDs if the "ID" contains a designed variant (mutations == 0):
+```{r}
+mut_collapse_15 <- mut_collapse_15 %>%
+  group_by(ID) %>%
+  filter(0 %in% mutations) %>%
+  ungroup()
+```
+
+Summarize the number of unique "ID" with mutations==0 (perfects) after filtering:
+```{r}
+mut_collapse_15.count <- mut_collapse_15 %>%
+  filter(mutations == 0) %>%
+  summarise(unique_rows = n_distinct(ID))
+
+print(mut_collapse_15.count)
+```
+
+Summarize the number of unique "ID" at each mutation level:
+```{r class.output="goodCode"}
+mut_collapse_15.summary <- mut_collapse_15 %>%
+  group_by(mutations) %>%
+  summarise(unique_IDs = n_distinct(ID))
+
+# View the summary table
+print(mut_collapse_15.summary)
+```
+
+Summarize the number of collapsed homologs after filtering
+```{r class.output="goodCode"}
+# Count the number of unique designed homologs retained in the filtered dataset:
+format(length(unique(mut_collapse_15$ID)), big.mark = ",")
+
+# Count the number of unique "mutID" after excluding rows with mutations==0 (retains mutants only)
+format(length(unique(mut_collapse_15$mutID[mut_collapse_15$mutations != 0])), big.mark = ",")
+
+# Now, count the number of unique "mutID" (this includes designed homologs and their mutants)
+format(length(unique(mut_collapse_15$mutID)), big.mark = ",")
+```
+
+#### Mutation Similarity
+
+Next, run correlation analyses between designed homologs and their corresponding mutant versions (1, 2, 3, 4, or 5 mutations) to determine if mutations share similar fitness values with designed variants
+
+```{r class.output="goodCode"}
+# Lib15
+
+# Filter the dataframe for mutations at each level (0,1,2,3,4,5)
+mutations15_0 <- subset(mut_collapse_15, mutations == 0)
+mutations15_1 <- subset(mut_collapse_15, mutations == 1)
+mutations15_2 <- subset(mut_collapse_15, mutations == 2)
+mutations15_3 <- subset(mut_collapse_15, mutations == 3)
+mutations15_4 <- subset(mut_collapse_15, mutations == 4)
+mutations15_5 <- subset(mut_collapse_15, mutations == 5)
+
+# Merge the dataframes based on shared "ID" for each mutation level against perfects
+Mut0vsMut1_15 <- merge(mutations15_0, mutations15_1, by = "ID", suffixes = c("_mutations_0", "_mutations_1"))
+Mut0vsMut2_15 <- merge(mutations15_0, mutations15_2, by = "ID", suffixes = c("_mutations_0", "_mutations_2"))
+Mut0vsMut3_15 <- merge(mutations15_0, mutations15_3, by = "ID", suffixes = c("_mutations_0", "_mutations_3"))
+Mut0vsMut4_15 <- merge(mutations15_0, mutations15_4, by = "ID", suffixes = c("_mutations_0", "_mutations_4"))
+Mut0vsMut5_15 <- merge(mutations15_0, mutations15_5, by = "ID", suffixes = c("_mutations_0", "_mutations_5"))
+
+# Subset relevant data columns and remove rows containing "NA" values
+Mut0vsMut1_15 <- Mut0vsMut1_15[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_1", "fitD05D03_mutations_0", "fitD05D03_mutations_1")] %>% na.omit(Mut0vsMut1_15)
+Mut0vsMut2_15 <- Mut0vsMut2_15[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_2", "fitD05D03_mutations_0", "fitD05D03_mutations_2")] %>% na.omit(Mut0vsMut2_15)
+Mut0vsMut3_15 <- Mut0vsMut3_15[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_3", "fitD05D03_mutations_0", "fitD05D03_mutations_3")] %>% na.omit(Mut0vsMut3_15)
+Mut0vsMut4_15 <- Mut0vsMut4_15[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_4", "fitD05D03_mutations_0", "fitD05D03_mutations_4")] %>% na.omit(Mut0vsMut4_15)
+Mut0vsMut5_15 <- Mut0vsMut5_15[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_5", "fitD05D03_mutations_0", "fitD05D03_mutations_5")] %>% na.omit(Mut0vsMut5_15)
+
+# Calculate correlation and p-value
+cor_test15_Mut0vsMut1 <- cor.test(Mut0vsMut1_15$fitD05D03_mutations_0, Mut0vsMut1_15$fitD05D03_mutations_1)
+cor_test15_Mut0vsMut2 <- cor.test(Mut0vsMut2_15$fitD05D03_mutations_0, Mut0vsMut2_15$fitD05D03_mutations_2)
+cor_test15_Mut0vsMut3 <- cor.test(Mut0vsMut3_15$fitD05D03_mutations_0, Mut0vsMut3_15$fitD05D03_mutations_3)
+cor_test15_Mut0vsMut4 <- cor.test(Mut0vsMut4_15$fitD05D03_mutations_0, Mut0vsMut4_15$fitD05D03_mutations_4)
+cor_test15_Mut0vsMut5 <- cor.test(Mut0vsMut5_15$fitD05D03_mutations_0, Mut0vsMut5_15$fitD05D03_mutations_5)
+
+cor_test15_Mut0vsMut1
+cor_test15_Mut0vsMut2
+cor_test15_Mut0vsMut3
+cor_test15_Mut0vsMut4
+cor_test15_Mut0vsMut5
+```
+
+#### Plot Correlations
+```{r class.output="goodCode"}
+# Extract correlation value from cor_result15_Mut0vsMut1 object
+cor_value_Mut0vsMut1 <- cor_test15_Mut0vsMut1$estimate
+cor_value_Mut0vsMut2 <- cor_test15_Mut0vsMut2$estimate
+cor_value_Mut0vsMut3 <- cor_test15_Mut0vsMut3$estimate
+cor_value_Mut0vsMut4 <- cor_test15_Mut0vsMut4$estimate
+cor_value_Mut0vsMut5 <- cor_test15_Mut0vsMut5$estimate
+
+
+# Format p-value in scientific notation
+p_value_scientific15_v1 <- format(cor_test15_Mut0vsMut1$p.value, scientific = TRUE, digits = 4)
+p_value_scientific15_v2 <- format(cor_test15_Mut0vsMut2$p.value, scientific = TRUE, digits = 4)
+p_value_scientific15_v3 <- format(cor_test15_Mut0vsMut3$p.value, scientific = TRUE, digits = 4)
+p_value_scientific15_v4 <- format(cor_test15_Mut0vsMut4$p.value, scientific = TRUE, digits = 4)
+p_value_scientific15_v5 <- format(cor_test15_Mut0vsMut5$p.value, scientific = TRUE, digits = 4)
+
+# Extract number of rows
+num_rows15.mut0v1 <- nrow(Mut0vsMut1_15)
+num_rows15.mut0v2 <- nrow(Mut0vsMut2_15)
+num_rows15.mut0v3 <- nrow(Mut0vsMut3_15)
+num_rows15.mut0v4 <- nrow(Mut0vsMut4_15)
+num_rows15.mut0v5 <- nrow(Mut0vsMut5_15)
+
+# Plot the correlation (Mut0vsMut1)
+mut0v1_15plot <- ggplot(Mut0vsMut1_15, 
+             aes(x = fitD05D03_mutations_0, y = fitD05D03_mutations_1, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD05D03 (mutations = 0)",
+       y = "fitD05D03 (mutations = 1)", color="",
+       title = "Lib15 Complementation (Mut=0 vs Mut=1)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut1_15$fitD05D03_mutations_0), y = min(Mut0vsMut1_15$fitD05D03_mutations_1), 
+           label = paste("p-value =", p_value_scientific15_v1), hjust = 1, vjust = 0) +
+  annotate("text", x = max(Mut0vsMut1_15$fitD05D03_mutations_0), y = min(Mut0vsMut1_15$fitD05D03_mutations_1),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut1, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut1_15$fitD05D03_mutations_0), y = max(Mut0vsMut1_15$fitD05D03_mutations_1),
+           label = paste("Mutants =", num_rows15.mut0v1), hjust = 0, vjust = 1.5)
+
+mut0v1_15plot2 <- ggMarginal(mut0v1_15plot, type = "histogram", fill = "#0072B2", alpha=0.75) #add side histograms
+mut0v1_15plot2
+
+# Plot the correlation (Mut0vsMut2)
+mut0v2_15plot <- ggplot(Mut0vsMut2_15, 
+             aes(x = fitD05D03_mutations_0, y = fitD05D03_mutations_2, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD05D03 (mutations = 0)",
+       y = "fitD05D03 (mutations = 2)", color="",
+       title = "Lib15 Complementation (Mut=0 vs Mut=2)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut2_15$fitD05D03_mutations_0), y = min(Mut0vsMut2_15$fitD05D03_mutations_2), 
+           label = paste("p-value =", p_value_scientific15_v2), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut2_15$fitD05D03_mutations_0), y = min(Mut0vsMut2_15$fitD05D03_mutations_2),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut2, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut2_15$fitD05D03_mutations_0), y = max(Mut0vsMut2_15$fitD05D03_mutations_2),
+           label = paste("Mutants =", num_rows15.mut0v2), hjust = 0, vjust = 1.5)
+
+mut0v2_15plot2 <- ggMarginal(mut0v2_15plot, type = "histogram", fill = "#0072B2", alpha=0.75) #add side histograms
+mut0v2_15plot2
+
+# Plot the correlation (Mut0vsMut3)
+mut0v3_15plot <- ggplot(Mut0vsMut3_15, 
+             aes(x = fitD05D03_mutations_0, y = fitD05D03_mutations_3, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD05D03 (mutations = 0)",
+       y = "fitD05D03 (mutations = 3)", color="",
+       title = "Lib15 Complementation (Mut=0 vs Mut=3)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut3_15$fitD05D03_mutations_0), y = min(Mut0vsMut3_15$fitD05D03_mutations_3), 
+           label = paste("p-value =", p_value_scientific15_v3), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut3_15$fitD05D03_mutations_0), y = min(Mut0vsMut3_15$fitD05D03_mutations_3),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut3, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut3_15$fitD05D03_mutations_0), y = max(Mut0vsMut3_15$fitD05D03_mutations_3),
+           label = paste("Mutants =", num_rows15.mut0v3), hjust = 0, vjust = 1.5)
+
+mut0v3_15plot2 <- ggMarginal(mut0v3_15plot, type = "histogram", fill = "#0072B2", alpha=0.75) #add side histograms
+mut0v3_15plot2
+
+# Plot the correlation (Mut0vsMut4)
+mut0v4_15plot <- ggplot(Mut0vsMut4_15, 
+             aes(x = fitD05D03_mutations_0, y = fitD05D03_mutations_4, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD05D03 (mutations = 0)",
+       y = "fitD05D03 (mutations = 4)", color="",
+       title = "Lib15 Complementation (Mut=0 vs Mut=4)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut4_15$fitD05D03_mutations_0), y = min(Mut0vsMut4_15$fitD05D03_mutations_4), 
+           label = paste("p-value =", p_value_scientific15_v4), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut4_15$fitD05D03_mutations_0), y = min(Mut0vsMut4_15$fitD05D03_mutations_4),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut4, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut4_15$fitD05D03_mutations_0), y = max(Mut0vsMut4_15$fitD05D03_mutations_4),
+           label = paste("Mutants =", num_rows15.mut0v4), hjust = 0, vjust = 1.5)
+
+mut0v4_15plot2 <- ggMarginal(mut0v4_15plot, type = "histogram", fill = "#0072B2", alpha=0.75) #add side histograms
+mut0v4_15plot2
+
+# Plot the correlation (Mut0vsMut5)
+mut0v5_15plot <- ggplot(Mut0vsMut5_15, 
+             aes(x = fitD05D03_mutations_0, y = fitD05D03_mutations_5, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD05D03 (mutations = 0)",
+       y = "fitD05D03 (mutations = 5)", color="",
+       title = "Lib15 Complementation (Mut=0 vs Mut=5)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut5_15$fitD05D03_mutations_0), y = min(Mut0vsMut5_15$fitD05D03_mutations_5), 
+           label = paste("p-value =", p_value_scientific15_v5), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut5_15$fitD05D03_mutations_0), y = min(Mut0vsMut5_15$fitD05D03_mutations_5),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut5, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut5_15$fitD05D03_mutations_0), y = max(Mut0vsMut5_15$fitD05D03_mutations_5),
+           label = paste("Mutants =", num_rows15.mut0v5), hjust = 0, vjust = 1.5)
+
+mut0v5_15plot2 <- ggMarginal(mut0v5_15plot, type = "histogram", fill = "#0072B2", alpha=0.75) #add side histograms
+mut0v5_15plot2
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Correlations/L15.mutant.correlation.mut0.vs.mut1.complementation.png",
+       plot=mut0v1_15plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L15.mutant.correlation.mut0.vs.mut2.complementation.png",
+       plot=mut0v2_15plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L15.mutant.correlation.mut0.vs.mut3.complementation.png",
+       plot=mut0v3_15plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L15.mutant.correlation.mut0.vs.mut4.complementation.png",
+       plot=mut0v4_15plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L15.mutant.correlation.mut0.vs.mut5.complementation.png",
+       plot=mut0v5_15plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+### Lib16
+
+Begin by selecting all mutants within a distance of 5 AA from their designed homologs
+```{r}
+mut_collapse_16 <- mutants16 %>%
+  filter(mutations >= 0 & mutations < 6) %>%
+  group_by(ID)
+```
+
+Merge these mutants with their designed homologs (perfects) if they have a matching "ID"
+```{r}
+# Add perfects to mut_collapse by shared columns:
+mut_collapse_16 <- full_join(mut_collapse_16, perfects16_5BCs)
+```
+
+Only retain mutIDs if the "ID" contains a designed variant (mutations == 0):
+```{r}
+mut_collapse_16 <- mut_collapse_16 %>%
+  group_by(ID) %>%
+  filter(0 %in% mutations) %>%
+  ungroup()
+```
+
+Summarize the number of unique "ID" with mutations==0 (perfects) after filtering:
+```{r class.output="goodCode"}
+mut_collapse_16.count <- mut_collapse_16 %>%
+  filter(mutations == 0) %>%
+  summarise(unique_rows = n_distinct(ID))
+
+print(mut_collapse_16.count)
+```
+
+Summarize the number of unique "ID" at each mutation level:
+```{r class.output="goodCode"}
+mut_collapse_16.summary <- mut_collapse_16 %>%
+  group_by(mutations) %>%
+  summarise(unique_IDs = n_distinct(ID))
+
+# View the summary table
+print(mut_collapse_16.summary)
+```
+
+Summarize the number of collapsed homologs after filtering
+```{r class.output="goodCode"}
+# Count the number of unique designed homologs retained in the filtered dataset:
+format(length(unique(mut_collapse_16$ID)), big.mark = ",")
+
+# Count the number of unique "mutID" after excluding rows with mutations==0 (retains mutants only)
+format(length(unique(mut_collapse_16$mutID[mut_collapse_15$mutations != 0])), big.mark = ",")
+
+# Now, count the number of unique "mutID" (this includes designed homologs and their mutants)
+format(length(unique(mut_collapse_16$mutID)), big.mark = ",")
+```
+
+#### Mutation Similarity
+
+Next, run correlation analyses between designed homologs and their corresponding mutant versions (1, 2, or 3 mutations) to determine if mutations share similar fitness values with designed variants
+```{r class.output="goodCode"}
+# Lib16
+
+# Filter the dataframe for perfects = 0 and subsequent mutations = 1,2,3,4,5
+mutations16_0 <- subset(mut_collapse_16, mutations == 0)
+mutations16_1 <- subset(mut_collapse_16, mutations == 1)
+mutations16_2 <- subset(mut_collapse_16, mutations == 2)
+mutations16_3 <- subset(mut_collapse_16, mutations == 3)
+mutations16_4 <- subset(mut_collapse_16, mutations == 4)
+mutations16_5 <- subset(mut_collapse_16, mutations == 5)
+
+# Merge the dataframes based on shared "ID"
+Mut0vsMut1_16 <- merge(mutations16_0, mutations16_1, by = "ID", suffixes = c("_mutations_0", "_mutations_1"))
+Mut0vsMut2_16 <- merge(mutations16_0, mutations16_2, by = "ID", suffixes = c("_mutations_0", "_mutations_2"))
+Mut0vsMut3_16 <- merge(mutations16_0, mutations16_3, by = "ID", suffixes = c("_mutations_0", "_mutations_3"))
+Mut0vsMut4_16 <- merge(mutations16_0, mutations16_4, by = "ID", suffixes = c("_mutations_0", "_mutations_4"))
+Mut0vsMut5_16 <- merge(mutations16_0, mutations16_5, by = "ID", suffixes = c("_mutations_0", "_mutations_5"))
+
+# Subset relevant data columns and remove rows containing "NA" values
+Mut0vsMut1_16 <- Mut0vsMut1_16[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_1", "fitD12D04_mutations_0", "fitD12D04_mutations_1")] %>% na.omit(Mut0vsMut1_16)
+Mut0vsMut2_16 <- Mut0vsMut2_16[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_2", "fitD12D04_mutations_0", "fitD12D04_mutations_2")] %>% na.omit(Mut0vsMut2_16)
+Mut0vsMut3_16 <- Mut0vsMut3_16[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_3", "fitD12D04_mutations_0", "fitD12D04_mutations_3")] %>% na.omit(Mut0vsMut3_16)
+Mut0vsMut4_16 <- Mut0vsMut4_16[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_4", "fitD12D04_mutations_0", "fitD12D04_mutations_4")] %>% na.omit(Mut0vsMut4_16)
+Mut0vsMut5_16 <- Mut0vsMut5_16[, c("ID", "numprunedBCs_mutations_0", "numprunedBCs_mutations_5", "fitD12D04_mutations_0", "fitD12D04_mutations_5")] %>% na.omit(Mut0vsMut5_16)
+
+
+# Calculate correlation and p-value
+cor_test16_Mut0vsMut1 <- cor.test(Mut0vsMut1_16$fitD12D04_mutations_0, Mut0vsMut1_16$fitD12D04_mutations_1)
+cor_test16_Mut0vsMut2 <- cor.test(Mut0vsMut2_16$fitD12D04_mutations_0, Mut0vsMut2_16$fitD12D04_mutations_2)
+cor_test16_Mut0vsMut3 <- cor.test(Mut0vsMut3_16$fitD12D04_mutations_0, Mut0vsMut3_16$fitD12D04_mutations_3)
+cor_test16_Mut0vsMut4 <- cor.test(Mut0vsMut4_16$fitD12D04_mutations_0, Mut0vsMut4_16$fitD12D04_mutations_4)
+cor_test16_Mut0vsMut5 <- cor.test(Mut0vsMut5_16$fitD12D04_mutations_0, Mut0vsMut5_16$fitD12D04_mutations_5)
+
+cor_test16_Mut0vsMut1
+cor_test16_Mut0vsMut2
+cor_test16_Mut0vsMut3
+cor_test16_Mut0vsMut4
+cor_test16_Mut0vsMut5
+```
+
+#### Plot Correlations
+```{r class.output="goodCode"}
+# Extract correlation value from cor_result16_Mut0vsMut1 object
+cor_value_Mut0vsMut1 <- cor_test16_Mut0vsMut1$estimate
+cor_value_Mut0vsMut2 <- cor_test16_Mut0vsMut2$estimate
+cor_value_Mut0vsMut3 <- cor_test16_Mut0vsMut3$estimate
+cor_value_Mut0vsMut4 <- cor_test16_Mut0vsMut4$estimate
+cor_value_Mut0vsMut5 <- cor_test16_Mut0vsMut5$estimate
+
+
+# Format p-value in scientific notation
+p_value_scientific16_v1 <- format(cor_test16_Mut0vsMut1$p.value, scientific = TRUE, digits = 4)
+p_value_scientific16_v2 <- format(cor_test16_Mut0vsMut2$p.value, scientific = TRUE, digits = 4)
+p_value_scientific16_v3 <- format(cor_test16_Mut0vsMut3$p.value, scientific = TRUE, digits = 4)
+p_value_scientific16_v4 <- format(cor_test16_Mut0vsMut4$p.value, scientific = TRUE, digits = 4)
+p_value_scientific16_v5 <- format(cor_test16_Mut0vsMut5$p.value, scientific = TRUE, digits = 4)
+
+# Extract number of rows
+num_rows16.mut0v1 <- nrow(Mut0vsMut1_16)
+num_rows16.mut0v2 <- nrow(Mut0vsMut2_16)
+num_rows16.mut0v3 <- nrow(Mut0vsMut3_16)
+num_rows16.mut0v4 <- nrow(Mut0vsMut4_16)
+num_rows16.mut0v5 <- nrow(Mut0vsMut5_16)
+
+# Plot the correlation (Mut0vsMut1)
+mut0v1_16plot <- ggplot(Mut0vsMut1_16, 
+             aes(x = fitD12D04_mutations_0, y = fitD12D04_mutations_1, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD12D04 (mutations = 0)",
+       y = "fitD12D04 (mutations = 1)", color="",
+       title = "Lib16 Complementation (Mut=0 vs Mut=1)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut1_16$fitD12D04_mutations_0), y = min(Mut0vsMut1_16$fitD12D04_mutations_1), 
+           label = paste("p-value =", p_value_scientific16_v1), hjust = 1, vjust = 0) +
+  annotate("text", x = max(Mut0vsMut1_16$fitD12D04_mutations_0), y = min(Mut0vsMut1_16$fitD12D04_mutations_1),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut1, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut1_16$fitD12D04_mutations_0), y = max(Mut0vsMut1_16$fitD12D04_mutations_1),
+           label = paste("Mutants =", num_rows16.mut0v1), hjust = 0, vjust = 1.5)
+
+mut0v1_16plot2 <- ggMarginal(mut0v1_16plot, type = "histogram", fill = "#E69F00", alpha=0.75) #add side histograms
+mut0v1_16plot2
+
+# Plot the correlation (Mut0vsMut2)
+mut0v2_16plot <- ggplot(Mut0vsMut2_16, 
+             aes(x = fitD12D04_mutations_0, y = fitD12D04_mutations_2, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD12D04 (mutations = 0)",
+       y = "fitD12D04 (mutations = 2)", color="",
+       title = "Lib16 Complementation (Mut=0 vs Mut=2)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut2_16$fitD12D04_mutations_0), y = min(Mut0vsMut2_16$fitD12D04_mutations_2), 
+           label = paste("p-value =", p_value_scientific16_v2), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut2_16$fitD12D04_mutations_0), y = min(Mut0vsMut2_16$fitD12D04_mutations_2),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut2, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut2_16$fitD12D04_mutations_0), y = max(Mut0vsMut2_16$fitD12D04_mutations_2),
+           label = paste("Mutants =", num_rows16.mut0v2), hjust = 0, vjust = 1.5)
+
+mut0v2_16plot2 <- ggMarginal(mut0v2_16plot, type = "histogram", fill = "#E69F00", alpha=0.75) #add side histograms
+mut0v2_16plot2
+
+# Plot the correlation (Mut0vsMut3)
+mut0v3_16plot <- ggplot(Mut0vsMut3_16, 
+             aes(x = fitD12D04_mutations_0, y = fitD12D04_mutations_3, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD12D04 (mutations = 0)",
+       y = "fitD12D04 (mutations = 3)", color="",
+       title = "Lib16 Complementation (Mut=0 vs Mut=3)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut3_16$fitD12D04_mutations_0), y = min(Mut0vsMut3_16$fitD12D04_mutations_3), 
+           label = paste("p-value =", p_value_scientific16_v3), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut3_16$fitD12D04_mutations_0), y = min(Mut0vsMut3_16$fitD12D04_mutations_3),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut3, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut3_16$fitD12D04_mutations_0), y = max(Mut0vsMut3_16$fitD12D04_mutations_3),
+           label = paste("Mutants =", num_rows16.mut0v3), hjust = 0, vjust = 1.5)
+
+mut0v3_16plot2 <- ggMarginal(mut0v3_16plot, type = "histogram", fill = "#E69F00", alpha=0.75) #add side histograms
+mut0v3_16plot2
+
+# Plot the correlation (Mut0vsMut4)
+mut0v4_16plot <- ggplot(Mut0vsMut4_16, 
+             aes(x = fitD12D04_mutations_0, y = fitD12D04_mutations_4, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD12D04 (mutations = 0)",
+       y = "fitD12D04 (mutations = 4)", color="",
+       title = "Lib16 Complementation (Mut=0 vs Mut=4)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut4_16$fitD12D04_mutations_0), y = min(Mut0vsMut4_16$fitD12D04_mutations_4), 
+           label = paste("p-value =", p_value_scientific16_v4), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut4_16$fitD12D04_mutations_0), y = min(Mut0vsMut4_16$fitD12D04_mutations_4),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut4, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut4_16$fitD12D04_mutations_0), y = max(Mut0vsMut4_16$fitD12D04_mutations_4),
+           label = paste("Mutants =", num_rows16.mut0v4), hjust = 0, vjust = 1.5)
+
+mut0v4_16plot2 <- ggMarginal(mut0v4_16plot, type = "histogram", fill = "#E69F00", alpha=0.75) #add side histograms
+mut0v4_16plot2
+
+# Plot the correlation (Mut0vsMut5)
+mut0v5_16plot <- ggplot(Mut0vsMut5_16, 
+             aes(x = fitD12D04_mutations_0, y = fitD12D04_mutations_5, color=numprunedBCs_mutations_0)) +
+  labs(x = "fitD12D04 (mutations = 0)",
+       y = "fitD12D04 (mutations = 5)", color="",
+       title = "Lib16 Complementation (Mut=0 vs Mut=5)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(alpha=0.7) +
+  scale_colour_gradient2("BCs",low="blue", high="red", mid="blue") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position="left") +
+  annotate("text", x = max(Mut0vsMut5_16$fitD12D04_mutations_0), y = min(Mut0vsMut5_16$fitD12D04_mutations_5), 
+           label = paste("p-value =", p_value_scientific16_v5), hjust = 1, vjust = 0)+
+  annotate("text", x = max(Mut0vsMut5_16$fitD12D04_mutations_0), y = min(Mut0vsMut5_16$fitD12D04_mutations_5),
+            label = paste("Correlation =", round(cor_value_Mut0vsMut5, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text", x = min(Mut0vsMut5_16$fitD12D04_mutations_0), y = max(Mut0vsMut5_16$fitD12D04_mutations_5),
+           label = paste("Mutants =", num_rows16.mut0v5), hjust = 0, vjust = 1.5)
+
+mut0v5_16plot2 <- ggMarginal(mut0v5_16plot, type = "histogram", fill = "#E69F00", alpha=0.75) #add side histograms
+mut0v5_16plot2
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Correlations/L16.mutant.correlation.mut0.vs.mut1.complementation.png",
+       plot=mut0v1_16plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L16.mutant.correlation.mut0.vs.mut2.complementation.png",
+       plot=mut0v2_16plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L16.mutant.correlation.mut0.vs.mut3.complementation.png",
+       plot=mut0v3_16plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L16.mutant.correlation.mut0.vs.mut4.complementation.png",
+       plot=mut0v4_16plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+
+ggsave(file="Mutants/PLOTS/Correlations/L16.mutant.correlation.mut0.vs.mut5.complementation.png",
+       plot=mut0v5_16plot2,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+## Homolog Mutant Fitness
+
+Create ridge plots for homolog fitness across the TMP gradient using homologs with 0 mutations, 1 associated mutation, and 5 associated mutations:
+
+**This section uses the `library(ggridges)` package.**
+
+First, subset the `mut_collapse_15` and `mut_collapse_16` objects to retain only "ID", "mutID", "numprunedBCs", "mutations", "seq", "pct_ident", and fitness values for first time point.
+```{r}
+# Lib15
+mut_collapse_15_subset <- mut_collapse_15 %>% select(ID, mutID, mutations, numprunedBCs, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03, seq, pct_ident)
+
+# Lib16
+mut_collapse_16_subset <- mut_collapse_16 %>% select(ID, mutID, mutations, numprunedBCs, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04, seq, pct_ident)
+```
+
+Transform both datasets prior to plotting ridge plots for fitness:
+
+### Perfects (>5 BCs, 0 mutations)
+```{r}
+# Lib15
+mut_collapse_15_subset_0mut <- mut_collapse_15_subset %>%
+  filter(mutations == 0) %>%  # Add this line to filter for mutations == 0
+  select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD05D03" ~ "0-TMP",
+    fc == "fitD06D03" ~ "0.058-TMP",
+    fc == "fitD07D03" ~ "0.5-TMP",
+    fc == "fitD08D03" ~ "1.0-TMP",
+    fc == "fitD09D03" ~ "10-TMP",
+    fc == "fitD10D03" ~ "50-TMP",
+    fc == "fitD11D03" ~ "200-TMP",
+    TRUE ~ NA_character_))
+
+# Lib16
+mut_collapse_16_subset_0mut <- mut_collapse_16_subset %>%
+  filter(mutations == 0) %>%  # Add this line to filter for mutations == 0
+  select(ID, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD12D04" ~ "0-TMP",
+    fc == "fitE01D04" ~ "0.058-TMP",
+    fc == "fitE02D04" ~ "0.5-TMP",
+    fc == "fitE03D04" ~ "1.0-TMP",
+    fc == "fitE04D04" ~ "10-TMP",
+    fc == "fitE05D04" ~ "50-TMP",
+    fc == "fitE06D04" ~ "200-TMP",
+    TRUE ~ NA_character_))
+```
+
+```{r}
+# Combine the two data frames
+mut_collapse_15_16_5BCs_0mut <- bind_rows(
+  mut_collapse_15_subset_0mut %>% mutate(Lib = "Codon1"),
+  mut_collapse_16_subset_0mut %>% mutate(Lib = "Codon2"),
+  .id = "id")
+```
+
+Plot Perfects fitness scores based on Supplementation treatment for first sampling time point
+```{r}
+mut_collapse_15_16_5BCs_0mut_order <- c("200-TMP", "50-TMP", "10-TMP", "1.0-TMP", "0.5-TMP", "0.058-TMP", "0-TMP")
+
+tmp_ridges_15_16_0mut <- ggplot(mut_collapse_15_16_5BCs_0mut, aes(x = val, y = factor(TMP, level = mut_collapse_15_16_5BCs_0mut_order), fill = Lib)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_y_discrete(labels = c('200 μg/mL TMP', '50 μg/mL TMP', '10 μg/mL TMP', '1 μg/mL TMP', '0.5 μg/mL TMP', '0.058 μg/mL TMP', 'Complementation')) +
+  xlab("Median Fitness (LogFC)") +
+  ylab("Selection Condition (ug/mL TMP)") +
+  ggtitle("Distance from Homolog \nMutations = 0 a.a.") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    legend.text = element_text(size = 12),
+    legend.title = element_blank()) +
+  scale_x_continuous(limits = c(-15, 10)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"), name = "Library")
+
+# Display the plot
+tmp_ridges_15_16_0mut
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.0.mutants.png",
+       plot=tmp_ridges_15_16_0mut,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+### Homologs w/ Muts (1 a.a. mutation)
+```{r}
+# Lib15
+mut_collapse_15_subset_0.1mut <- mut_collapse_15_subset %>%
+  #filter(mutations %in% c(0, 1)) %>%
+  filter(mutations == 1) %>%
+  select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD05D03" ~ "0-TMP",
+    fc == "fitD06D03" ~ "0.058-TMP",
+    fc == "fitD07D03" ~ "0.5-TMP",
+    fc == "fitD08D03" ~ "1.0-TMP",
+    fc == "fitD09D03" ~ "10-TMP",
+    fc == "fitD10D03" ~ "50-TMP",
+    fc == "fitD11D03" ~ "200-TMP",
+    TRUE ~ NA_character_))
+
+# Lib16
+mut_collapse_16_subset_0.1mut <- mut_collapse_16_subset %>%
+  #filter(mutations %in% c(0, 1)) %>%
+  filter(mutations == 1) %>%
+  select(ID, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD12D04" ~ "0-TMP",
+    fc == "fitE01D04" ~ "0.058-TMP",
+    fc == "fitE02D04" ~ "0.5-TMP",
+    fc == "fitE03D04" ~ "1.0-TMP",
+    fc == "fitE04D04" ~ "10-TMP",
+    fc == "fitE05D04" ~ "50-TMP",
+    fc == "fitE06D04" ~ "200-TMP",
+    TRUE ~ NA_character_))
+```
+
+```{r}
+# Combine the two data frames
+mut_collapse_15_16_5BCs_0.1mut <- bind_rows(
+  mut_collapse_15_subset_0.1mut %>% mutate(Lib = "Codon1"),
+  mut_collapse_16_subset_0.1mut %>% mutate(Lib = "Codon2"),
+  .id = "id")
+```
+
+Plot Perfects fitness scores based on Supplementation treatment for first sampling time point
+```{r}
+mut_collapse_15_16_5BCs_0.1mut_order <- c("200-TMP", "50-TMP", "10-TMP", "1.0-TMP", "0.5-TMP", "0.058-TMP", "0-TMP")
+
+tmp_ridges_15_16_0.1mut <- ggplot(mut_collapse_15_16_5BCs_0.1mut, aes(x = val, y = factor(TMP, level = mut_collapse_15_16_5BCs_0.1mut_order), fill = Lib)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_y_discrete(labels = c('200 μg/mL TMP', '50 μg/mL TMP', '10 μg/mL TMP', '1 μg/mL TMP', '0.5 μg/mL TMP', '0.058 μg/mL TMP', 'Complementation')) +
+  xlab("Median Fitness (LogFC)") +
+  ylab("Selection Condition (ug/mL TMP)") +
+  ggtitle("Distance from Homolog \nMutations = 1 a.a.") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.title = element_blank()) +
+  scale_x_continuous(limits = c(-15, 10)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"), name = "Library")
+
+# Display the plot
+tmp_ridges_15_16_0.1mut
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.1.mutants.png",
+       plot=tmp_ridges_15_16_0.1mut,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+### Homologs w/ Muts (2 a.a. mutation)
+```{r}
+# Lib15
+mut_collapse_15_subset_0.2mut <- mut_collapse_15_subset %>%
+  #filter(mutations %in% c(0, 1, 2)) %>%
+  filter(mutations == 2) %>%
+  select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD05D03" ~ "0-TMP",
+    fc == "fitD06D03" ~ "0.058-TMP",
+    fc == "fitD07D03" ~ "0.5-TMP",
+    fc == "fitD08D03" ~ "1.0-TMP",
+    fc == "fitD09D03" ~ "10-TMP",
+    fc == "fitD10D03" ~ "50-TMP",
+    fc == "fitD11D03" ~ "200-TMP",
+    TRUE ~ NA_character_))
+
+# Lib16
+mut_collapse_16_subset_0.2mut <- mut_collapse_16_subset %>%
+  #filter(mutations %in% c(0, 1, 2)) %>%
+  filter(mutations == 2) %>%
+  select(ID, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD12D04" ~ "0-TMP",
+    fc == "fitE01D04" ~ "0.058-TMP",
+    fc == "fitE02D04" ~ "0.5-TMP",
+    fc == "fitE03D04" ~ "1.0-TMP",
+    fc == "fitE04D04" ~ "10-TMP",
+    fc == "fitE05D04" ~ "50-TMP",
+    fc == "fitE06D04" ~ "200-TMP",
+    TRUE ~ NA_character_))
+```
+
+```{r}
+# Combine the two data frames
+mut_collapse_15_16_5BCs_0.2mut <- bind_rows(
+  mut_collapse_15_subset_0.2mut %>% mutate(Lib = "Codon1"),
+  mut_collapse_16_subset_0.2mut %>% mutate(Lib = "Codon2"),
+  .id = "id")
+```
+
+Plot Perfects fitness scores based on Supplementation treatment for first sampling time point
+```{r}
+mut_collapse_15_16_5BCs_0.2mut_order <- c("200-TMP", "50-TMP", "10-TMP", "1.0-TMP", "0.5-TMP", "0.058-TMP", "0-TMP")
+
+tmp_ridges_15_16_0.2mut <- ggplot(mut_collapse_15_16_5BCs_0.2mut, aes(x = val, y = factor(TMP, level = mut_collapse_15_16_5BCs_0.2mut_order), fill = Lib)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_y_discrete(labels = c('200 μg/mL TMP', '50 μg/mL TMP', '10 μg/mL TMP', '1 μg/mL TMP', '0.5 μg/mL TMP', '0.058 μg/mL TMP', 'Complementation')) +
+  xlab("Median Fitness (LogFC)") +
+  ylab("Selection Condition (ug/mL TMP)") +
+  ggtitle("Distance from Homolog \nMutations = 2 a.a.") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    legend.text = element_text(size = 12),
+    legend.title = element_blank()) +
+  scale_x_continuous(limits = c(-15, 10)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"), name = "Library")
+
+# Display the plot
+tmp_ridges_15_16_0.2mut
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.2.mutants.png",
+       plot=tmp_ridges_15_16_0.2mut,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+### Homologs w/ Muts (3 a.a. mutation)
+```{r}
+# Lib15
+mut_collapse_15_subset_0.3mut <- mut_collapse_15_subset %>%
+  #filter(mutations %in% c(0, 1, 2, 3)) %>%
+  filter(mutations == 3) %>%
+  select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD05D03" ~ "0-TMP",
+    fc == "fitD06D03" ~ "0.058-TMP",
+    fc == "fitD07D03" ~ "0.5-TMP",
+    fc == "fitD08D03" ~ "1.0-TMP",
+    fc == "fitD09D03" ~ "10-TMP",
+    fc == "fitD10D03" ~ "50-TMP",
+    fc == "fitD11D03" ~ "200-TMP",
+    TRUE ~ NA_character_))
+
+# Lib16
+mut_collapse_16_subset_0.3mut <- mut_collapse_16_subset %>%
+  #filter(mutations %in% c(0, 1, 2, 3)) %>%
+  filter(mutations == 3) %>%
+  select(ID, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD12D04" ~ "0-TMP",
+    fc == "fitE01D04" ~ "0.058-TMP",
+    fc == "fitE02D04" ~ "0.5-TMP",
+    fc == "fitE03D04" ~ "1.0-TMP",
+    fc == "fitE04D04" ~ "10-TMP",
+    fc == "fitE05D04" ~ "50-TMP",
+    fc == "fitE06D04" ~ "200-TMP",
+    TRUE ~ NA_character_))
+```
+
+```{r}
+# Combine the two data frames
+mut_collapse_15_16_5BCs_0.3mut <- bind_rows(
+  mut_collapse_15_subset_0.3mut %>% mutate(Lib = "Codon1"),
+  mut_collapse_16_subset_0.3mut %>% mutate(Lib = "Codon2"),
+  .id = "id")
+```
+
+Plot Perfects fitness scores based on Supplementation treatment for first sampling time point
+```{r}
+mut_collapse_15_16_5BCs_0.3mut_order <- c("200-TMP", "50-TMP", "10-TMP", "1.0-TMP", "0.5-TMP", "0.058-TMP", "0-TMP")
+
+tmp_ridges_15_16_0.3mut <- ggplot(mut_collapse_15_16_5BCs_0.3mut, aes(x = val, y = factor(TMP, level = mut_collapse_15_16_5BCs_0.3mut_order), fill = Lib)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_y_discrete(labels = c('200 μg/mL TMP', '50 μg/mL TMP', '10 μg/mL TMP', '1 μg/mL TMP', '0.5 μg/mL TMP', '0.058 μg/mL TMP', 'Complementation')) +
+  xlab("Median Fitness (LogFC)") +
+  ylab("Selection Condition (ug/mL TMP)") +
+  ggtitle("Distance from Homolog \nMutations = 3 a.a.") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    legend.text = element_text(size = 12),
+    legend.title = element_blank()) +
+  scale_x_continuous(limits = c(-15, 10)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"), name = "Library")
+
+# Display the plot
+tmp_ridges_15_16_0.3mut
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.3.mutants.png",
+       plot=tmp_ridges_15_16_0.3mut,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+### Homologs w/ Muts (4 a.a. mutation)
+```{r}
+# Lib15
+mut_collapse_15_subset_0.4mut <- mut_collapse_15_subset %>%
+  #filter(mutations %in% c(0, 1, 2, 3, 4)) %>%
+  filter(mutations == 4) %>%
+  select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD05D03" ~ "0-TMP",
+    fc == "fitD06D03" ~ "0.058-TMP",
+    fc == "fitD07D03" ~ "0.5-TMP",
+    fc == "fitD08D03" ~ "1.0-TMP",
+    fc == "fitD09D03" ~ "10-TMP",
+    fc == "fitD10D03" ~ "50-TMP",
+    fc == "fitD11D03" ~ "200-TMP",
+    TRUE ~ NA_character_))
+
+# Lib16
+mut_collapse_16_subset_0.4mut <- mut_collapse_16_subset %>%
+  #filter(mutations %in% c(0, 1, 2, 3, 4)) %>%
+  filter(mutations == 4) %>%
+  select(ID, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD12D04" ~ "0-TMP",
+    fc == "fitE01D04" ~ "0.058-TMP",
+    fc == "fitE02D04" ~ "0.5-TMP",
+    fc == "fitE03D04" ~ "1.0-TMP",
+    fc == "fitE04D04" ~ "10-TMP",
+    fc == "fitE05D04" ~ "50-TMP",
+    fc == "fitE06D04" ~ "200-TMP",
+    TRUE ~ NA_character_))
+```
+
+```{r}
+# Combine the two data frames
+mut_collapse_15_16_5BCs_0.4mut <- bind_rows(
+  mut_collapse_15_subset_0.4mut %>% mutate(Lib = "Codon1"),
+  mut_collapse_16_subset_0.4mut %>% mutate(Lib = "Codon2"),
+  .id = "id")
+```
+
+Plot Perfects fitness scores based on Supplementation treatment for first sampling time point
+```{r}
+mut_collapse_15_16_5BCs_0.4mut_order <- c("200-TMP", "50-TMP", "10-TMP", "1.0-TMP", "0.5-TMP", "0.058-TMP", "0-TMP")
+
+tmp_ridges_15_16_0.4mut <- ggplot(mut_collapse_15_16_5BCs_0.4mut, aes(x = val, y = factor(TMP, level = mut_collapse_15_16_5BCs_0.4mut_order), fill = Lib)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_y_discrete(labels = c('200 μg/mL TMP', '50 μg/mL TMP', '10 μg/mL TMP', '1 μg/mL TMP', '0.5 μg/mL TMP', '0.058 μg/mL TMP', 'Complementation')) +
+  xlab("Median Fitness (LogFC)") +
+  ylab("Selection Condition (ug/mL TMP)") +
+  ggtitle("Distance from Homolog \nMutations = 4 a.a.") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    legend.text = element_text(size = 12),
+    legend.title = element_blank()) +
+  scale_x_continuous(limits = c(-15, 10)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"), name = "Library")
+
+# Display the plot
+tmp_ridges_15_16_0.4mut
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.4.mutants.png",
+       plot=tmp_ridges_15_16_0.4mut,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+### Homologs w/ Muts (5 a.a. mutations)
+```{r}
+# Lib15
+mut_collapse_15_subset_0.5mut <- mut_collapse_15_subset %>%
+  #filter(mutations %in% c(0, 1, 2, 3, 4, 5)) %>%
+  filter(mutations == 5) %>%
+  select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD05D03" ~ "0-TMP",
+    fc == "fitD06D03" ~ "0.058-TMP",
+    fc == "fitD07D03" ~ "0.5-TMP",
+    fc == "fitD08D03" ~ "1.0-TMP",
+    fc == "fitD09D03" ~ "10-TMP",
+    fc == "fitD10D03" ~ "50-TMP",
+    fc == "fitD11D03" ~ "200-TMP",
+    TRUE ~ NA_character_))
+
+# Lib16
+mut_collapse_16_subset_0.5mut <- mut_collapse_16_subset %>%
+  #filter(mutations %in% c(0, 1, 2, 3, 4, 5)) %>%
+  filter(mutations == 5) %>%
+  select(ID, fitD12D04, fitE01D04, fitE02D04, fitE03D04, fitE04D04, fitE05D04, fitE06D04) %>%
+  pivot_longer(!ID, names_to = "fc", values_to = "val") %>%
+  mutate(TMP = case_when(
+    fc == "fitD12D04" ~ "0-TMP",
+    fc == "fitE01D04" ~ "0.058-TMP",
+    fc == "fitE02D04" ~ "0.5-TMP",
+    fc == "fitE03D04" ~ "1.0-TMP",
+    fc == "fitE04D04" ~ "10-TMP",
+    fc == "fitE05D04" ~ "50-TMP",
+    fc == "fitE06D04" ~ "200-TMP",
+    TRUE ~ NA_character_))
+```
+
+```{r}
+# Combine the two data frames
+mut_collapse_15_16_5BCs_0.5mut <- bind_rows(
+  mut_collapse_15_subset_0.5mut %>% mutate(Lib = "Codon1"),
+  mut_collapse_16_subset_0.5mut %>% mutate(Lib = "Codon2"),
+  .id = "id")
+```
+
+Plot Perfects fitness scores based on Supplementation treatment for first sampling time point
+```{r}
+mut_collapse_15_16_5BCs_0.5mut_order <- c("200-TMP", "50-TMP", "10-TMP", "1.0-TMP", "0.5-TMP", "0.058-TMP", "0-TMP")
+
+tmp_ridges_15_16_0.5mut <- ggplot(mut_collapse_15_16_5BCs_0.5mut, aes(x = val, y = factor(TMP, level = mut_collapse_15_16_5BCs_0.5mut_order), fill = Lib)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_y_discrete(labels = c('200 μg/mL TMP', '50 μg/mL TMP', '10 μg/mL TMP', '1 μg/mL TMP', '0.5 μg/mL TMP', '0.058 μg/mL TMP', 'Complementation')) +
+  xlab("Median Fitness (LogFC)") +
+  ylab("Selection Condition (ug/mL TMP)") +
+  ggtitle("Distance from Homolog \nMutations = 5 a.a.") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    legend.text = element_text(size = 12),
+    legend.title = element_blank()) +
+  scale_x_continuous(limits = c(-15, 10)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"), name = "Library")
+
+# Display the plot
+tmp_ridges_15_16_0.5mut
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.5.mutants.png",
+       plot=tmp_ridges_15_16_0.5mut,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+```{r}
+patch7 <- tmp_ridges_15_16_0mut | tmp_ridges_15_16_0.1mut | tmp_ridges_15_16_0.5mut
+patch7
+```
+
+```{r echo = FALSE}
+ggsave(file="Mutants/PLOTS/Fitness/Lib15.16.5BCs.mutants.dose.response.ridges.combined.png", 
+       plot=patch7,
+       dpi=600, width = 12, height = 8, units = "in")
+```
+
+## Mutant Fitness Gains
+
+### Lib15
+
+#### 5 a.a. Distance Only
+
+Test the significance of fitness changes between perfect assemblies (mutations = 0) and associated mutants up to 5 a.a. distance for each TMP treatment within both libraries. The following code applied to Lib15 (Codon 1) testing fitness differences across mutations at the 200-TMP (400x MIC) treatment.
+```{r}
+# Step 1: Prepare the data
+Lib15.mut.5aa.differences <- mut_collapse_15_subset %>%
+  filter(mutations %in% c(0, 5)) %>%
+  group_by(ID, mutations) %>%
+  summarise(fitD11D03 = mean(fitD11D03, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = mutations, values_from = fitD11D03, names_prefix = "mut_") %>%
+  filter(!is.na(mut_0) & !is.na(mut_5)) %>%
+  mutate(difference = mut_5 - mut_0)
+
+# Step 2: Plot the distribution
+Lib15.mut.200.tmp.5aa.plot <- ggplot(Lib15.mut.5aa.differences, aes(x = difference)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black") +
+  geom_vline(aes(xintercept = mean(difference, na.rm = TRUE)), 
+             color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Distribution of Differences in fitD11D03",
+       subtitle = "5 a.a. distance (mutants) minus 0 a.a. distance (perfects)",
+       x = "Difference",
+       y = "Count") +
+  theme_minimal() +
+    theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0,2),
+                     breaks = seq(0, 2, by = 1)) +
+  scale_x_continuous(expand = c(0, 0), limits = c(-4,12),
+                     breaks = seq(-4, 12, by = 2))
+
+print(Lib15.mut.200.tmp.5aa.plot)
+```
+
+```{r echo=FALSE}
+# Save the plot
+ggsave("Mutants/PLOTS/fitD11D03_differences_histogram_5vs0.png", 
+       plot = Lib15.mut.200.tmp.5aa.plot, 
+       width = 5, height = 4)
+```
+
+Add NCBI taxonomy to each homolog "ID" in the "Lib15.mut.5aa.differences" dataset:
+```{r}
+Lib15.mut.5aa.differences.columns <- c("ID", "PctIdentEcoli", "TaxID", "NCBI.name", "NCBI.superkingdom", "NCBI.phylum", "NCBI.class", "NCBI.order", "NCBI.family", "NCBI.genus", "NCBI.species")
+
+Lib15.mut.5aa.differences_merged <- Lib15.mut.5aa.differences %>%
+  left_join(Alltree15_taxa_merged %>% select(all_of(Lib15.mut.5aa.differences.columns)), by = "ID")
+
+# View the merged dataframe
+print(Lib15.mut.5aa.differences_merged)
+
+# Save the Lib15.mut.5aa.differences data frame
+write.csv(Lib15.mut.5aa.differences_merged, 
+          "Mutants/OUTPUT/mut15.0.5.differences.200tmp.csv", row.names = FALSE)
+```
+
+#### All a.a. Distance (1-5)
+
+Summarize the effects of mutational changes at 5 a.a. distance from recovered perfect homologs:
+```{r}
+# Step 1: Prepare the data (same as before)
+Lib15.mut.5aa.summary.differences <- mut_collapse_15_subset %>%
+  filter(mutations %in% c(0, 1, 2, 3, 4, 5)) %>%
+  group_by(ID, mutations) %>%
+  summarise(fitD11D03 = mean(fitD11D03, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = mutations, values_from = fitD11D03, names_prefix = "mut_") %>%
+  filter(!is.na(mut_0)) %>%
+  mutate(
+    diff_1_0 = mut_1 - mut_0,
+    diff_2_0 = mut_2 - mut_0,
+    diff_3_0 = mut_3 - mut_0,
+    diff_4_0 = mut_4 - mut_0,
+    diff_5_0 = mut_5 - mut_0
+  ) %>%
+  select(ID, starts_with("diff_"))
+
+# Step 2: Reshape the data for plotting
+Lib15.mut.5aa.summary.differences_long <- Lib15.mut.5aa.summary.differences %>%
+  pivot_longer(cols = starts_with("diff_"), 
+               names_to = "comparison", 
+               values_to = "difference") %>%
+  mutate(num_mutations = as.integer(substr(comparison, 6, 6)))
+
+# Step 3: Perform statistical tests
+Lib15.mut.5aa.summary.differences.stat_tests <- Lib15.mut.5aa.summary.differences_long %>%
+  group_by(comparison) %>%
+  summarise(
+    mean_diff = mean(difference, na.rm = TRUE),
+    p_value = t.test(difference)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(p_value_label = ifelse(p_value < 0.001, "p < 0.001",
+                                ifelse(p_value < 0.01, "p < 0.01",
+                                       ifelse(p_value < 0.05, "p < 0.05",
+                                              paste("p =", round(p_value, 3))))))
+
+print(Lib15.mut.5aa.summary.differences.stat_tests)
+```
+
+Next, we'll track the mutational fitness gains at each a.a. distance (from 1-5 a.a.):
+```{r}
+# Step 4: Histogram plot with statistical test results
+Lib15.mut.5aa.summary.histogram_plot <- ggplot(Lib15.mut.5aa.summary.differences_long,
+                                               aes(x = difference, fill = comparison)) +
+  geom_histogram(binwidth = 0.1, position = "identity", alpha = 0.6) +
+  geom_vline(data = Lib15.mut.5aa.summary.differences.stat_tests,
+             aes(xintercept = mean_diff, color = comparison),
+             linetype = "dashed", size = 1) +
+  geom_text(data = Lib15.mut.5aa.summary.differences.stat_tests,
+            aes(x = Inf, y = Inf, label = p_value_label),
+            hjust = 1.1, vjust = 1.1, size = 3) +
+  labs(title = "Distribution of Codon 1 Fitness Differences at 200 TMP",
+       subtitle = "Mutations 1, 2, 3, 4, 5 minus Mutation 0",
+       x = "Difference",
+       y = "Count") +
+  facet_wrap(~comparison, scales = "free_y", nrow = 1) +
+  theme_minimal() +
+    theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+Lib15.mut.5aa.summary.histogram_plot
+
+# Step 4: Line plot of distribution vs number of mutations
+Lib15.mut.5aa.summary.line_plot <- ggplot(Lib15.mut.5aa.summary.differences_long, 
+                                          aes(x = num_mutations, y = difference)) +
+  geom_jitter(alpha = 0.1, width = 0.2) +
+  geom_boxplot(aes(group = num_mutations), alpha = 0.5, outlier.shape = NA) +
+  geom_smooth(method = "loess", se = TRUE, color = "red") +
+  labs(title = "Distribution of Differences vs Number of Mutations",
+       x = "Number of Mutations",
+       y = "Fitness Difference at 200 TMP \n(Codon 1)") +
+  theme_minimal() +
+    theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+Lib15.mut.5aa.summary.line_plot
+```
+
+```{r}
+Lib15.mut.5aa.summary.differences.columns <- c("ID", "PctIdentEcoli", "TaxID", "NCBI.name", "NCBI.superkingdom", "NCBI.phylum", "NCBI.class", "NCBI.order", "NCBI.family", "NCBI.genus", "NCBI.species")
+
+Lib15.mut.5aa.summary.differences_merged <- Lib15.mut.5aa.summary.differences %>%
+  left_join(Alltree15_taxa_merged %>% select(all_of(Lib15.mut.5aa.summary.differences.columns)), by = "ID")
+
+# View the merged dataframe
+print(Lib15.mut.5aa.summary.differences_merged)
+
+# Save the Lib15.mut.5aa.differences data frame
+write.csv(Lib15.mut.5aa.summary.differences_merged, 
+          "Mutants/OUTPUT/mut15.0.1.2.3.4.5.differences.200tmp.csv", row.names = FALSE)
+```
+
+```{r}
+patch8 <- Lib15.mut.5aa.summary.histogram_plot / Lib15.mut.5aa.summary.line_plot
+patch8
+```
+
+```{r echo=FALSE}
+# Save the plots
+ggsave("Mutants/PLOTS/fitD11D03_differences_histogram_12345vs0.png", 
+       plot = Lib15.mut.5aa.summary.histogram_plot, width = 12, height = 8)
+ggsave("Mutants/PLOTS/fitD11D03_differences_vs_mutations_line.png", 
+       plot = Lib15.mut.5aa.summary.line_plot, width = 10, height = 6)
+ggsave("Mutants/PLOTS/itD11D03_differences_vs_mutations_histogram.lineplot.png", 
+       plot = patch8, width = 10, height = 10)
+```
+
+### Lib16
+
+#### 5 a.a. Distance Only
+
+Test the significance of fitness changes between perfect assemblies (mutations = 0) and associated mutants up to 5 a.a. distance for each TMP treatment within both libraries. The following code applied to Lib16 (Codon 2) testing fitness differences across mutations at the 200-TMP (400x MIC) treatment.
+```{r}
+# Step 1: Prepare the data
+Lib16.mut.5aa.differences <- mut_collapse_16_subset %>%
+  filter(mutations %in% c(0, 5)) %>%
+  group_by(ID, mutations) %>%
+  summarise(fitE06D04 = mean(fitE06D04, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = mutations, values_from = fitE06D04, names_prefix = "mut_") %>%
+  filter(!is.na(mut_0) & !is.na(mut_5)) %>%
+  mutate(difference = mut_5 - mut_0)
+
+# Step 2: Plot the distribution
+Lib16.mut.200.tmp.5aa.plot <- ggplot(Lib16.mut.5aa.differences, aes(x = difference)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black") +
+  geom_vline(aes(xintercept = mean(difference, na.rm = TRUE)), 
+             color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Codon 2 Distribution of Differences at 400x MIC",
+       subtitle = "5 a.a. distance (mutants) minus 0 a.a. distance (perfects)",
+       x = "Difference",
+       y = "Count") +
+  theme_minimal() +
+    theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0,4),
+                     breaks = seq(0, 4, by = 1)) +
+  scale_x_continuous(expand = c(0, 0), limits = c(-8,14),
+                     breaks = seq(-8, 14, by = 2))
+
+print(Lib16.mut.200.tmp.5aa.plot)
+```
+
+```{r echo=FALSE}
+# Save the plot
+ggsave("Mutants/PLOTS/fitE06D04_differences_histogram_5vs0.png", 
+       plot = Lib16.mut.200.tmp.5aa.plot, 
+       width = 5, height = 4)
+```
+
+Add NCBI taxonomy to each homolog "ID" in the "Lib16.mut.5aa.differences" dataset:
+```{r}
+Lib16.mut.5aa.differences.columns <- c("ID", "PctIdentEcoli", "TaxID", "NCBI.name", "NCBI.superkingdom", "NCBI.phylum", "NCBI.class", "NCBI.order", "NCBI.family", "NCBI.genus", "NCBI.species")
+
+Lib16.mut.5aa.differences_merged <- Lib16.mut.5aa.differences %>%
+  left_join(Alltree15_taxa_merged %>% select(all_of(Lib16.mut.5aa.differences.columns)), by = "ID")
+
+# View the merged dataframe
+print(Lib16.mut.5aa.differences_merged)
+
+# Save the Lib16.mut.5aa.differences data frame
+write.csv(Lib16.mut.5aa.differences_merged, 
+          "Mutants/OUTPUT/mut16.0.5.differences.200tmp.csv", row.names = FALSE)
+```
+
+#### All a.a. Distances (1-5)
+
+Summarize the effects of mutational changes at 5 a.a. distance from recovered perfect homologs:
+```{r}
+# Step 1: Prepare the data (same as before)
+Lib16.mut.5aa.summary.differences <- mut_collapse_16_subset %>%
+  filter(mutations %in% c(0, 1, 2, 3, 4, 5)) %>%
+  group_by(ID, mutations) %>%
+  summarise(fitE06D04 = mean(fitE06D04, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = mutations, values_from = fitE06D04, names_prefix = "mut_") %>%
+  filter(!is.na(mut_0)) %>%
+  mutate(
+    diff_1_0 = mut_1 - mut_0,
+    diff_2_0 = mut_2 - mut_0,
+    diff_3_0 = mut_3 - mut_0,
+    diff_4_0 = mut_4 - mut_0,
+    diff_5_0 = mut_5 - mut_0
+  ) %>%
+  select(ID, starts_with("diff_"))
+
+# Step 2: Reshape the data for plotting
+Lib16.mut.5aa.summary.differences_long <- Lib16.mut.5aa.summary.differences %>%
+  pivot_longer(cols = starts_with("diff_"), 
+               names_to = "comparison", 
+               values_to = "difference") %>%
+  mutate(num_mutations = as.integer(substr(comparison, 6, 6)))
+
+# Step 3: Perform statistical tests
+Lib16.mut.5aa.summary.differences.stat_tests <- Lib16.mut.5aa.summary.differences_long %>%
+  group_by(comparison) %>%
+  summarise(
+    mean_diff = mean(difference, na.rm = TRUE),
+    p_value = t.test(difference)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(p_value_label = ifelse(p_value < 0.001, "p < 0.001",
+                                ifelse(p_value < 0.01, "p < 0.01",
+                                       ifelse(p_value < 0.05, "p < 0.05",
+                                              paste("p =", round(p_value, 3))))))
+
+print(Lib16.mut.5aa.summary.differences.stat_tests)
+```
+
+Next, we'll track the mutational fitness gains at each a.a. distance (from 1-5 a.a.):
+```{r}
+# Step 4: Histogram plot with statistical test results
+Lib16.mut.5aa.summary.histogram_plot <- ggplot(Lib16.mut.5aa.summary.differences_long,
+                                               aes(x = difference, fill = comparison)) +
+  geom_histogram(binwidth = 0.1, position = "identity", alpha = 0.6) +
+  geom_vline(data = Lib16.mut.5aa.summary.differences.stat_tests,
+             aes(xintercept = mean_diff, color = comparison),
+             linetype = "dashed", size = 1) +
+  geom_text(data = Lib16.mut.5aa.summary.differences.stat_tests,
+            aes(x = Inf, y = Inf, label = p_value_label),
+            hjust = 1.1, vjust = 1.1, size = 3) +
+  labs(title = "Distribution of Codon 2 Fitness Differences at 200 TMP",
+       subtitle = "Mutations 1, 2, 3, 4, 5 minus Mutation 0",
+       x = "Difference",
+       y = "Count") +
+  facet_wrap(~comparison, scales = "free_y", nrow = 1) +
+  theme_minimal() +
+    theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+Lib16.mut.5aa.summary.histogram_plot
+
+# Step 4: Line plot of distribution vs number of mutations
+Lib16.mut.5aa.summary.line_plot <- ggplot(Lib16.mut.5aa.summary.differences_long, 
+                                          aes(x = num_mutations, y = difference)) +
+  geom_jitter(alpha = 0.1, width = 0.2) +
+  geom_boxplot(aes(group = num_mutations), alpha = 0.5, outlier.shape = NA) +
+  geom_smooth(method = "loess", se = TRUE, color = "red") +
+  labs(title = "Distribution of Differences vs Number of Mutations",
+       x = "Number of Mutations",
+       y = "Fitness Difference at 200 TMP \n(Codon 2)") +
+  theme_minimal() +
+    theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+Lib16.mut.5aa.summary.line_plot
+```
+
+```{r}
+Lib16.mut.5aa.summary.differences.columns <- c("ID", "PctIdentEcoli", "TaxID", "NCBI.name", "NCBI.superkingdom", "NCBI.phylum", "NCBI.class", "NCBI.order", "NCBI.family", "NCBI.genus", "NCBI.species")
+
+Lib16.mut.5aa.summary.differences_merged <- Lib16.mut.5aa.summary.differences %>%
+  left_join(Alltree15_taxa_merged %>% select(all_of(Lib16.mut.5aa.summary.differences.columns)), by = "ID")
+
+# View the merged dataframe
+print(Lib16.mut.5aa.summary.differences_merged)
+
+# Save the Lib16.mut.5aa.differences data frame
+write.csv(Lib16.mut.5aa.summary.differences_merged, 
+          "Mutants/OUTPUT/mut16.0.1.2.3.4.5.differences.200tmp.csv", row.names = FALSE)
+```
+
+```{r}
+patch9 <- Lib16.mut.5aa.summary.histogram_plot / Lib16.mut.5aa.summary.line_plot
+patch9
+```
+
+```{r echo=FALSE}
+# Save the plots
+ggsave("Mutants/PLOTS/fitE06D04_differences_histogram_12345vs0.png", 
+       plot = Lib16.mut.5aa.summary.histogram_plot, width = 12, height = 8)
+ggsave("Mutants/PLOTS/fitE06D04_differences_vs_mutations_line.png", 
+       plot = Lib16.mut.5aa.summary.line_plot, width = 10, height = 6)
+ggsave("Mutants/PLOTS/fitE06D04_differences_vs_mutations_histogram.lineplot.png", 
+       plot = patch9, width = 10, height = 10)
+```
+
+### Combined Codon Plots
+
+Plot both Codon versions together in single plot:
+```{r}
+patch10 <- Lib15.mut.5aa.summary.histogram_plot / Lib15.mut.5aa.summary.line_plot | Lib16.mut.5aa.summary.histogram_plot / Lib16.mut.5aa.summary.line_plot
+patch10
+```
+
+```{r echo=FALSE}
+# Save the plot
+ggsave("Mutants/PLOTS/Codon1_Codon2_differences_vs_mutations_histogram.lineplot.png", 
+       plot = patch10, width = 14, height = 10)
+```
+
+## Mutant Median Fitness
+The `mut_collapse` datasets contain unique IDs and all associated mutIDs up to 5 A.A. distance. Start by grouping mutIDs by ID and calculating the median fitness value for each unique ID within each TMP treatment. The number of unique IDs for each codon version should still be: **Codon 1 = 797** and **Codon 2 = 666*. However, the fitness values should be different from those calculated based only on perfects (mutations == 0). Plot the change in median fitness value by TMP treatment.
+
+### Calculate Median Fitness
+
+**Lib15:** Group mutIDs by ID and calculate the median fitness value for each unique ID within each TMP treatment.
+```{r}
+#Calculate median fitness for each homolog and associated mutants and sum the total number of BCs (numBCs and numprunedBCs)
+mut_collapse_15info <- mut_collapse_15 %>%
+  group_by(ID) %>%
+  summarise(medD05D03=median(fitD05D03, na.rm=T),
+            medD06D03=median(fitD06D03, na.rm=T),
+            medD07D03=median(fitD07D03, na.rm=T),
+            medD08D03=median(fitD08D03, na.rm=T),
+            medD09D03=median(fitD09D03, na.rm=T),
+            medD10D03=median(fitD10D03, na.rm=T),
+            medD11D03=median(fitD11D03, na.rm=T),
+            totalnumBCs.L15=sum(numBCs),
+            totalnumprunedBCs.L15=sum(numprunedBCs))
+```
+
+Count the number of unique IDs after collapsing mutants up to 5 A.A. distance:
+```{r class.output="goodCode"}
+format(length(unique(mut_collapse_15info$ID)), big.mark = ",")
+```
+
+**Lib16:** Group mutIDs by ID and calculate the median fitness value for each unique ID within each TMP treatment.
+```{r}
+#Calculate median fitness for each homolog and associated mutants and sum the total number of BCs (numBCs and numprunedBCs)
+mut_collapse_16info <- mut_collapse_16 %>%
+  group_by(ID) %>%
+  summarise(medD12D04=median(fitD12D04, na.rm=T),
+            medE01D04=median(fitE01D04, na.rm=T),
+            medE02D04=median(fitE02D04, na.rm=T),
+            medE03D04=median(fitE03D04, na.rm=T),
+            medE04D04=median(fitE04D04, na.rm=T),
+            medE05D04=median(fitE05D04, na.rm=T),
+            medE06D04=median(fitE06D04, na.rm=T),
+            totalnumBCs.L16=sum(numBCs),
+            totalnumprunedBCs.L16=sum(numprunedBCs))
+```
+
+Count the number of unique IDs after collapsing mutants up to 5 A.A. distance:
+```{r class.output="goodCode"}
+format(length(unique(mut_collapse_16info$ID)), big.mark = ",")
+```
+
+### Plot Median TMP Fitness
+Combine both datasets and assign labels for the plot:
+```{r}
+# Combine the dataframes
+mut_collapse_15.16_info_combined_df <- full_join(mut_collapse_15info, mut_collapse_16info, by = "ID")
+
+# Create a mapping for the new labels
+mut_collapse_15.16_info_label_map <- c(
+  "medD05D03" = "0", "medD06D03" = "0.058", "medD07D03" = "0.5", "medD08D03" = "1",
+  "medD09D03" = "10", "medD10D03" = "50", "medD11D03" = "200",
+  "medD12D04" = "0", "medE01D04" = "0.058", "medE02D04" = "0.5", "medE03D04" = "1",
+  "medE04D04" = "10", "medE05D04" = "50", "medE06D04" = "200"
+)
+
+# Reshape and relabel the data
+mut_collapse_15.16_info_plot_data <- mut_collapse_15.16_info_combined_df %>%
+  pivot_longer(
+    cols = starts_with("med"),
+    names_to = "condition",
+    values_to = "fitness") %>%
+  mutate(
+    library = case_when(
+      startsWith(condition, "medD") & condition != "medD12D04" ~ "Codon1",
+      condition == "medD12D04" | startsWith(condition, "medE") ~ "Codon2",
+      TRUE ~ NA_character_),
+    treatment = mut_collapse_15.16_info_label_map[condition],
+    treatment = factor(treatment, levels = c("0", "0.058", "0.5", "1", "10", "50", "200")))
+```
+
+Plot as boxplot:
+```{r}
+# Create the plot
+mut_collapse_15.16_info_plot <- ggplot(mut_collapse_15.16_info_plot_data, 
+                                       aes(x = treatment, y = fitness, fill = library)) +
+  geom_boxplot(position = position_dodge(width = 0.8), alpha = 0.8) +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12),
+    legend.position = "bottom") +
+  labs(
+    title = "Median Fitness \nCollapsed to 5 a.a. Distance",
+    x = "Trimethoprim (ug/mL)",
+    y = "Median Fitness (LogFC)",
+    fill = "Library") +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00")) +
+  scale_x_discrete(drop = FALSE)
+
+mut_collapse_15.16_info_plot
+```
+
+```{r echo=FALSE}
+# Save the plot
+ggsave("Mutants/PLOTS/Codon1_Codon2_median.fitness.tmp.gradient.png", 
+       plot = mut_collapse_15.16_info_plot, width = 6, height = 6)
+```
+
+### Merge Libraries
+
+Generate a new dataframe retaining only the unique IDs shared between libraries:
+```{r}
+shared_mut_collapse_15.16info <- merge(mut_collapse_15info, mut_collapse_16info, by = "ID")
+```
+
+Count the number of unique IDs shared between libraries:
+```{r class.output="goodCode"}
+format(length(unique(shared_mut_collapse_15.16info$ID)), big.mark = ",")
+```
+
+Subset relevant data columns for correlations and remove rows containing "NA" values:
+```{r}
+# Complementation - 0-TMP
+Shared.Mut.Collapse.counts.0.tmp <- shared_mut_collapse_15.16info[, c("ID", "totalnumprunedBCs.L15", "totalnumprunedBCs.L16", "medD05D03","medD12D04")] %>% na.omit(Shared.Mut.Collapse.counts.0.tmp)
+```
+
+Calculate correlation between median fitness values for unique IDs shared between libraries:
+```{r}
+# Calculate correlation and p-value between Lib15 and Lib16 Complementation
+cor_test_shared_mut_collapse_15.16info <- cor.test(Shared.Mut.Collapse.counts.0.tmp$medD05D03,
+                                                   Shared.Mut.Collapse.counts.0.tmp$medD12D04)
+
+cor_test_shared_mut_collapse_15.16info
+```
+
+### Plot Correlation
+
+Plot the median fitness correlation between unique IDs shared between Lib15 and Lib16 (median with collapsed mutants):
+```{r}
+# Extract correlation value from cor_test_shared_mut_collapse_15.16info object
+cor_value_shared <- cor_test_shared_mut_collapse_15.16info$estimate
+
+# Format p-value in scientific notation
+p_value_scientific_shared <- format(cor_test_shared_mut_collapse_15.16info$p.value, 
+                                                    scientific = TRUE, digits = 4)
+
+# Extract number of rows
+num_rows.counts.5aa.0.tmp <- nrow(Shared.Mut.Collapse.counts.0.tmp)
+
+Lib15_16_0_TMP_5AA <- ggplot(Shared.Mut.Collapse.counts.0.tmp, 
+             aes(x = medD05D03, y = medD12D04)) +
+  labs(x = "Codon 1 Median Fitness w/ 5 A.A. Distance (LogFC) \n(0 μg/mL tmp)",
+       y ="Codon 2 Median Fitness w/ 5 A.A. Distance (LogFC) \n(0 μg/mL tmp)") +
+  geom_smooth(method=lm,colour="black") +
+  geom_density2d(colour="black",alpha=0.2) +
+  geom_point(aes(color = case_when(
+    medD05D03 >= -1 & medD12D04 >= -1 ~ "lightblue4",
+    medD05D03 >= -1 & medD12D04 < -1 ~ "#0072B2",
+    medD12D04 >= -1 & medD05D03 < -1 ~ "#E69F00",
+    TRUE ~ "black"
+  ),
+  fill = case_when(
+    medD05D03 >= -1 & medD12D04 >= -1 ~ "lightblue4",
+    medD05D03 >= -1 & medD12D04 < -1 ~ "#0072B2",
+    medD12D04 >= -1 & medD05D03 < -1 ~ "#E69F00",
+    TRUE ~ "white"
+  ),
+  shape = case_when(
+    medD05D03 >= -1 & medD12D04 >= -1 ~ 16,
+    medD05D03 >= -1 & medD12D04 < -1 ~ 16,
+    medD12D04 >= -1 & medD05D03 < -1 ~ 16,
+    TRUE ~ 21
+  )), 
+  alpha = 0.75, size = 2.5) +
+scale_shape_identity() +
+scale_color_identity() +
+scale_fill_identity() +
+  # Add a new point for WT E. coli median fitness
+  geom_point(data = BCcontrols_15_16_shared_median_WT, 
+             aes(x = fitD05D03, y = fitD12D04), 
+             fill = "red", color = "black", size = 4, shape = 24) +
+  # Add a new point for Neg Ctrl (D27N, mCherry) median fitness
+  geom_point(data = BCcontrols_15_16_shared_median_Neg, 
+             aes(x = fitD05D03, y = fitD12D04), 
+             color = "black", size = 5, shape = 18) +
+  theme(legend.position="none") +
+  theme(axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        panel.background = element_blank()) +
+  panel_border(color = "black") +
+  annotate("text", 
+           x = max(Shared.Mut.Collapse.counts.0.tmp$medD05D03), 
+           y = min(Shared.Mut.Collapse.counts.0.tmp$medD12D04), 
+           label = paste("p-value =", p_value_scientific_shared), hjust = 1, vjust = 0) +
+  annotate("text", 
+           x = max(Shared.Mut.Collapse.counts.0.tmp$medD05D03), 
+           y = min(Shared.Mut.Collapse.counts.0.tmp$medD12D04),
+           label = paste("Correlation =", round(cor_value_shared, 2)), hjust = 1, vjust = -1.5) +
+  annotate("text",
+           x = min(Shared.Mut.Collapse.counts.0.tmp$medD05D03),
+           y = max(Shared.Mut.Collapse.counts.0.tmp$medD12D04),
+           label = paste("Shared Perfects =", num_rows.counts.5aa.0.tmp), hjust = 0, vjust = 1.5) +
+  scale_x_continuous(breaks = seq(floor(min(Shared.Mut.Collapse.counts.0.tmp$medD05D03)), 
+                                  ceiling(max(Shared.Mut.Collapse.counts.0.tmp$medD05D03)), by = 1)) +
+  scale_y_continuous(breaks = seq(floor(min(Shared.Mut.Collapse.counts.0.tmp$medD12D04)), 
+                                  ceiling(max(Shared.Mut.Collapse.counts.0.tmp$medD12D04)), by = 1))
+
+# Add side histograms
+Lib15_16_0_TMP_5AA_p01 <- ggMarginal(Lib15_16_0_TMP_5AA, type = "histogram", fill = "lightblue4", alpha=0.5) 
+
+# View plot
+Lib15_16_0_TMP_5AA_p01
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Correlations/Lib15.16.shared.collapsed.mutants.5AA.median.complementation.png",
+       plot=Lib15_16_0_TMP_5AA_p01,
+       dpi=600, width = 8, height = 6, units = "in")
+```
+
+## Generate Mutant FASTA
+
+Generate a FASTA file for each library containing each unique mutID (designed homologs (ID) and mutants (mutID) up to 5 AA difference) and their corresponding protein sequence for use in broad mutational scanning (BMS) and gain-of-function (GOF) analysis. Use the `mut_collapse_15` dataset for Lib15.
+
+### Keep Complementing Perfects
+
+First, we need to remove any unique ID with mutations == 0 and fitD05D03 < -1 to retain only those unique perfect IDs capable of complementation.
+```{r}
+# Filter dataset to remove fitness < -1
+mut_collapse_15_good <- mut_collapse_15 %>%
+  # Group by ID
+  group_by(ID) %>%
+  # Filter out rows where mutations == 0 and fitD05D03 < -1
+  filter(!(mutations == 0 & fitD05D03 < -1)) %>%
+  # Ungroup the data frame
+  ungroup()
+
+# Step to add back all rows where ID == "NP_414590"
+mut_collapse_15_good_rows_to_add <- mut_collapse_15 %>%
+  filter(ID == "NP_414590")  # Get all rows with ID NP_414590
+
+# Combine the filtered data frame with the rows to add
+mut_collapse_15_good <- bind_rows(mut_collapse_15_good, mut_collapse_15_good_rows_to_add) %>%
+  distinct()  # Optional: Remove any duplicate rows that may have been introduced
+
+# Create subset to retain only perfects (mutations == 0) for initial BMS FASTA:
+mut_collapse_15_good_0_muts <- mut_collapse_15_good %>%
+  filter(mutations == 0)  # Keep all rows where mutations == 0
+```
+
+### Keep Associated Mutants
+
+Next, we'll identify which IDs have at least one example of mutations = 0 and then filter out all mutIDs that don't correspond to a perfect ID:
+```{r}
+# Step 1: Identify IDs that have at least one row with mutations == 0
+mut_collapse_15_good_valid_ids <- mut_collapse_15_good_0_muts %>%
+  filter(mutations == 0) %>%
+  select(ID) %>%
+  distinct()
+
+# Step 2: Filter the original data frame to keep only rows with valid IDs
+mut_collapse_15_good_filtered <- mut_collapse_15_good %>%
+  filter(ID %in% mut_collapse_15_good_valid_ids$ID)
+```
+
+### Generate FASTA file
+
+Now we'll generate the FASTA file from the filtered `mut_collapse_15_good_0_muts` dataset for BMS analysis.
+
+<font color="red">You will have to open the .fasta file and add the WT E. coli DHFR homolog (reference sequence) manually since it's fitD05D03 values was less than -1 and subsequently removed during the previous filtering step.</font>
+```{r}
+# Lib15
+
+# Create the sequences in FASTA format
+mut_collapse_15_good_0_muts_fasta_content <- paste(">", mut_collapse_15_good_0_muts$mutID, "\n", mut_collapse_15_good_0_muts$seq, "\n", sep = "", collapse = "")
+
+# Define the file path in the working directory
+mut_collapse_15_good_0_muts_fasta_file_path <- file.path(getwd(), "Mutants/mutants_files_formatted/Lib15.mutant.collapse.good.5AA.fasta")
+
+# Write the FASTA content to the file
+writeLines(mut_collapse_15_good_0_muts_fasta_content, 
+           con = mut_collapse_15_good_0_muts_fasta_file_path)
+```
+
+## False-Positive Rate
+
+### Codon 1 Library
+
+```{r class.output="goodCode"}
+# All mutants within 5 AA distance at Complementation
+filtered_mutant_data_comp_full <- mutants15 %>%
+  filter(mutations < 6, !is.na(fitD05D03))
+print(paste("Number of rows with mutations < 6 at Complementation:", nrow(filtered_mutant_data_comp_full)))
+
+# Filtered mutants within 5 AA distance to retain only those with > 1 numprunedBCs at Complementation
+filtered_mutant_data_comp_good <- mutants15 %>%
+  filter(mutations < 6, numprunedBCs > 1, !is.na(fitD05D03))
+print(paste("Number of rows with mutations < 6 and numprunedBCs > 1 at Complementation:", nrow(filtered_mutant_data_comp_good)))
+
+```
+
+**Complementation:** Calculate false positive rate for mutant variants > 50 with fitD05D03 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_comp <- mutants15 %>%
+  filter(mutations > 49, !is.na(fitD05D03))
+
+# Print the number of rows after filtering
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_comp)))
+
+# Define a logical condition for false positives (fitD05D03 > -1 are false positives)
+false_positives_comp <- filtered_mutant_data_comp %>%
+  filter(fitD05D03 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at Complementation (fitD05D03 > -1):", nrow(false_positives_comp)))
+
+# Calculate the number of false positives
+num_false_positives_comp <- nrow(false_positives_comp)
+#print(paste("Number of false positives at Complementation:", num_false_positives_comp))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_comp <- nrow(filtered_mutant_data_comp)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at Complementation:", total_criteria_met_comp))
+
+# Calculate the false positive rate
+false_positive_rate_comp <- (num_false_positives_comp / total_criteria_met_comp) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at Complementation:", round(false_positive_rate_comp, 2), "%"))
+```
+
+**MIC:** Calculate false positive rate for mutant variants > 50 with fitD07D03 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_MIC <- mutants15 %>%
+  filter(mutations > 49, !is.na(fitD07D03))
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_MIC)))
+
+# Define a logical condition for false positives (fitD05D03 > -1 are false positives)
+false_positives_MIC <- filtered_mutant_data_MIC %>%
+  filter(fitD07D03 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at MIC (fitD07D03 > -1):", nrow(false_positives_MIC)))
+
+# Calculate the number of false positives
+num_false_positives_MIC <- nrow(false_positives_MIC)
+#print(paste("Number of false positives at MIC:", num_false_positives_MIC))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_MIC <- nrow(filtered_mutant_data_MIC)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at MIC:", total_criteria_met_MIC))
+
+# Calculate the false positive rate
+false_positive_rate_MIC <- (num_false_positives_MIC / total_criteria_met_MIC) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at MIC:", round(false_positive_rate_MIC, 2), "%"))
+```
+
+**400x MIC:** Calculate false positive rate for mutant variants > 50 with fitD11D03 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_400xMIC <- mutants15 %>%
+  filter(mutations > 49, !is.na(fitD11D03))
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_400xMIC)))
+
+# Define a logical condition for false positives (fitD05D03 > -1 are false positives)
+false_positives_400xMIC <- filtered_mutant_data_400xMIC %>%
+  filter(fitD11D03 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at 400x MIC (fitD11D03 > -1):", nrow(false_positives_400xMIC)))
+
+# Calculate the number of false positives
+num_false_positives_400xMIC <- nrow(false_positives_400xMIC)
+#print(paste("Number of false positives at 400x MIC:", num_false_positives_400xMIC))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_400xMIC <- nrow(filtered_mutant_data_400xMIC)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at 400x MIC:", total_criteria_met_400xMIC))
+
+# Calculate the false positive rate
+false_positive_rate_400xMIC <- (num_false_positives_400xMIC / total_criteria_met_400xMIC) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at 400x MIC:", round(false_positive_rate_400xMIC, 2), "%"))
+```
+
+**M9-Supp:** Calculate false positive rate for mutant variants > 50 with fitD03D01 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_M9 <- mutants15 %>%
+  filter(mutations > 49, !is.na(fitD03D01))
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_M9)))
+
+# Define a logical condition for false positives (fitD05D03 > -1 are false positives)
+false_positives_M9 <- filtered_mutant_data_M9 %>%
+  filter(fitD03D01 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at M9-Supp (fitD03D01 > -1):", nrow(false_positives_M9)))
+
+# Calculate the number of false positives
+num_false_positives_M9 <- nrow(false_positives_M9)
+#print(paste("Number of false positives at M9-Supp:", num_false_positives_M9))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_M9 <- nrow(filtered_mutant_data_M9)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at M9-Supp:", total_criteria_met_M9))
+
+# Calculate the false positive rate
+false_positive_rate_M9 <- (num_false_positives_M9 / total_criteria_met_M9) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at M9-Supp:", round(false_positive_rate_M9, 2), "%"))
+```
+
+### Codon 2 Library
+
+**Complementation:** Calculate false positive rate for mutant variants > 50 with fitD12D04 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_comp_16 <- mutants16 %>%
+  filter(mutations > 49, !is.na(fitD12D04))
+
+# Print the number of rows after filtering
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_comp_16)))
+
+# Define a logical condition for false positives (fitD05D03 > -1 are false positives)
+false_positives_comp_16 <- filtered_mutant_data_comp_16 %>%
+  filter(fitD12D04 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at Complementation (fitD12D04 > -1):", nrow(false_positives_comp_16)))
+
+# Calculate the number of false positives
+num_false_positives_comp_16 <- nrow(false_positives_comp_16)
+#print(paste("Number of false positives at Complementation:", num_false_positives_comp_16))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_comp_16 <- nrow(filtered_mutant_data_comp_16)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at Complementation:", total_criteria_met_comp_16))
+
+# Calculate the false positive rate
+false_positive_rate_comp_16 <- (num_false_positives_comp_16 / total_criteria_met_comp_16) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at Complementation:", round(false_positive_rate_comp_16, 2), "%"))
+```
+
+**MIC:** Calculate false positive rate for mutant variants > 50 with fitD07D03 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_MIC_16 <- mutants16 %>%
+  filter(mutations > 49, !is.na(fitE02D04))
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_MIC_16)))
+
+# Define a logical condition for false positives (fitE02D04 > -1 are false positives)
+false_positives_MIC_16 <- filtered_mutant_data_MIC_16 %>%
+  filter(fitE02D04 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at MIC (fitE02D04 > -1):", nrow(false_positives_MIC_16)))
+
+# Calculate the number of false positives
+num_false_positives_MIC_16 <- nrow(false_positives_MIC_16)
+#print(paste("Number of false positives at MIC:", num_false_positives_MIC_16))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_MIC_16 <- nrow(filtered_mutant_data_MIC_16)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at MIC:", total_criteria_met_MIC_16))
+
+# Calculate the false positive rate
+false_positive_rate_MIC_16 <- (num_false_positives_MIC_16 / total_criteria_met_MIC_16) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at MIC:", round(false_positive_rate_MIC_16, 2), "%"))
+```
+
+**400x MIC:** Calculate false positive rate for mutant variants > 50 with fitD11D03 > -1 in Codon 1:
+```{r class.output="goodCode"}
+# Filter the data for mutations > 49 and remove rows where fitD05D03 is NA
+filtered_mutant_data_400xMIC_16 <- mutants16 %>%
+  filter(mutations > 49, !is.na(fitE06D04))
+print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_400xMIC_16)))
+
+# Define a logical condition for false positives (fitE06D04 > -1 are false positives)
+false_positives_400xMIC_16 <- filtered_mutant_data_400xMIC_16 %>%
+  filter(fitE06D04 > -1, numprunedBCs > 1)
+print(paste("Number of false positives at 400x MIC (fitE06D04 > -1):", nrow(false_positives_400xMIC_16)))
+
+# Calculate the number of false positives
+num_false_positives_400xMIC_16 <- nrow(false_positives_400xMIC_16)
+#print(paste("Number of false positives at 400x MIC:", num_false_positives_400xMIC_16))
+
+# Calculate the total number of entries that meet the criteria
+total_criteria_met_400xMIC_16 <- nrow(filtered_mutant_data_400xMIC_16)
+#print(paste("Total number of entries meeting initial criteria (> 49 mutations) at 400x MIC:", total_criteria_met_400xMIC_16))
+
+# Calculate the false positive rate
+false_positive_rate_400xMIC_16 <- (num_false_positives_400xMIC_16 / total_criteria_met_400xMIC_16) * 100
+
+# Print the false positive rate
+print(paste("False positive rate at 400x MIC:", round(false_positive_rate_400xMIC_16, 2), "%"))
+```
+
+# Save Mutants Files
+
+Save the formatted mutants files to import for downstream analyses
+```{r}
+# mut_collapse_15
+write.csv(mut_collapse_15, 
+          "Mutants/mutants_files_formatted/mut_collapse_15.csv", row.names = FALSE)
+
+# mut_collapse_15_good_filtered (2.5 MB)
+write.csv(mut_collapse_15_good_filtered, 
+          "Mutants/mutants_files_formatted/mut_collapse_15_good_filtered.csv", row.names = FALSE)
+
+# Alltree15_taxa_merged (611 KB)
+write.csv(Alltree15_taxa_merged, 
+          "Mutants/mutants_files_formatted/Alltree15_taxa_merged.csv", row.names = FALSE)
+
+# perfects_15_16_5BCs_tree (319 KB)
+write.csv(perfects_15_16_5BCs_tree, 
+          "Mutants/mutants_files_formatted/perfects_15_16_5BCs_tree.csv", row.names = FALSE)
+
+# orginfo (2.1 MB)
+write.csv(orginfo, 
+          "Mutants/mutants_files_formatted/orginfo.csv", row.names = FALSE)
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
