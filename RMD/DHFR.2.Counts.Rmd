@@ -1,0 +1,2911 @@
+---
+title: "Sequencing Counts Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Import Data Files
+
+Import **MAPPING** files generated from [DHFR.1.Mapping.RMD](https://github.com/PlesaLab/DHFR) relevant for downstream analysis.
+```{r}
+### BCs_mutID (both codon versions):
+
+# Lib15 (Codon 1)
+BCs_mutID_15 <- read.csv("Mapping/map_files_formatted/BCs_mutID_15.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# Lib16 (Codon 2)
+BCs_mutID_16 <- read.csv("Mapping/map_files_formatted/BCs_mutID_16.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+### mutIDinfo (both codon versions):
+
+# Lib15 (Codon 1)
+mutIDinfo15 <- read.csv("Mapping/map_files_formatted/mutIDinfo15.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# Lib16 (Codon 2)
+mutIDinfo16 <- read.csv("Mapping/map_files_formatted/mutIDinfo16.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+``` 
+
+# Count Data Analysis
+
+## Import Count Data
+**Import the count data (sequences) for each sampling condition in Library 15 (D01, D03, D05:D11) and Library 16 (D02, D04, D12:E6).** Each .csv file contains two columns: **(1)** [`BC`] represents the **unique barcode** recovered from the sampling condition, and **(2)** [`D0X`] represents the **sequence counts** matching each barcode within the sampling condition.
+
+Import all Library 15 count files:
+```{r}
+### Library 15
+
+## Library 15 - T0
+
+# D01 - Lib15 - Overnight Growth on LB - T0
+D01 = read.csv("Count/D01_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D01) <- c("BC","D01")
+
+# D03 - Lib15 - Growth on M9 - Full Supplement - T0
+D03 = read.csv("Count/D03_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D03) <- c("BC","D03")
+
+## Library 15 - T1
+
+# D05 - Lib15 - Growth on M9 - 0 ug/mL TMP - T1
+D05 = read.csv("Count/D05_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D05) <- c("BC","D05")
+
+# D06 - Lib15 - Growth on M9 - 0.058 ug/ml TMP - T1
+D06 = read.csv("Count/D06_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D06) <- c("BC","D06")
+
+# D07 - Lib15 - Growth on M9 - 0.5 ug/ml TMP - T1
+D07 = read.csv("Count/D07_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D07) <- c("BC","D07")
+
+# D08 - Lib15 - Growth on M9 - 1.0 ug/ml TMP - T1
+D08 = read.csv("Count/D08_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D08) <- c("BC","D08")
+
+# D09 - Lib15 - Growth on M9 - 10.0 ug/ml TMP - T1
+D09 = read.csv("Count/D09_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D09) <- c("BC","D09")
+
+# D10 - Lib15 - Growth on M9 - 50.0 ug/ml TMP - T1
+D10 = read.csv("Count/D10_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D10) <- c("BC","D10")
+
+# D11 - Lib15 - Growth on M9 - 200.0 ug/ml TMP - T1
+D11 = read.csv("Count/D11_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D11) <- c("BC","D11")
+```
+
+Import all Library 16 count files:
+```{r}
+### Library 16
+
+## Library 16 - T0
+
+# D02 - Lib16 - Overnight Growth on LB - T0
+D02 = read.csv("Count/D02_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D02) <- c("BC","D02")
+
+# D04 - Lib16 - Growth on M9 - Full Supplement - T0
+D04 = read.csv("Count/D04_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D04) <- c("BC","D04")
+
+## Library 16 - T1
+
+# D12 - Lib16 - Growth on M9 - 0 ug/mL TMP - T1
+D12 = read.csv("Count/D12_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(D12) <- c("BC","D12")
+
+# E01 - Lib16 - Growth on M9 - 0.058 ug/ml TMP - T1
+E01 = read.csv("Count/E01_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(E01) <- c("BC","E01")
+
+# E02 - Lib16 - Growth on M9 - 0.5 ug/ml TMP - T1
+E02 = read.csv("Count/E02_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(E02) <- c("BC","E02")
+
+# E03 - Lib16 - Growth on M9 - 1.0 ug/ml TMP - T1
+E03 = read.csv("Count/E03_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(E03) <- c("BC","E03")
+
+# E04 - Lib16 - Growth on M9 - 10.0 ug/ml TMP - T1
+E04 = read.csv("Count/E04_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(E04) <- c("BC","E04")
+
+# E05 - Lib16 - Growth on M9 - 50.0 ug/ml TMP - T1
+E05 = read.csv("Count/E05_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(E05) <- c("BC","E05")
+
+# E06 - Lib16 - Growth on M9 - 200.0 ug/ml TMP - T1
+E06 = read.csv("Count/E06_collapse_d1.tsv", head=FALSE, sep="\t") %>%
+  select(-V3)
+colnames(E06) <- c("BC","E06")
+```
+
+## Raw Read Counts
+
+**Summarize the imported count data by sampling condition for each codon-version library.** Begin by combining the count data from each sampling condition into a single data frame for each library. Next, sum the full count values for each sampling condition (total number of sequences recovered for each sampling condition). Then, sum the number of unique barcodes recovered from each sampling condition. Define the sampling condition associated with each sample code. Finally, write the data summary to a .csv file and save in the working directory.
+
+**Summarize Library 15**
+```{r}
+## Library 15
+
+# Merge data objects together into single dataframe
+norm_vals_15 <- data.frame(sample=c("D01","D03","D05","D06","D07","D08","D09","D10","D11"),
+                        counts=c(sum(D01$D01),sum(D03$D03),sum(D05$D05),sum(D06$D06),sum(D07$D07),sum(D08$D08),
+                                 sum(D09$D09),sum(D10$D10),sum(D11$D11)),
+                        numBCs=c(length(D01$D01),length(D03$D03),length(D05$D05),length(D06$D06),length(D07$D07),
+                                 length(D08$D08),length(D09$D09),length(D10$D10),length(D11$D11)),
+                        sampledesc=c("D01 - Lib15 - T0 - Overnight Growth on LB",
+                                     "D03 - Lib15 - T0 - Growth on M9 - Full Supplement",
+                                     "D05 - Lib15 - T1 - Growth on M9 - 0.0 ug/ml TMP",
+                                     "D06 - Lib15 - T1 - Growth on M9 - 0.058 ug/ml TMP",
+                                     "D07 - Lib15 - T1 - Growth on M9 - 0.5 ug/ml TMP",
+                                     "D08 - Lib15 - T1 - Growth on M9 - 1.0 ug/ml TMP",
+                                     "D09 - Lib15 - T1 - Growth on M9 - 10.0 ug/ml TMP",
+                                     "D10 - Lib15 - T1 - Growth on M9 - 50.0 ug/ml TMP",
+                                     "D11 - Lib15 - T1 - Growth on M9 - 200.0 ug/ml TMP"),
+                        TMP=c("Overnight LB", "Full Supplement", "0-tmp", "0.058-tmp", "0.5-tmp",
+                              "1.0-tmp", "10-tmp", "50-tmp", "200-tmp"))
+```
+
+```{r echo=FALSE}
+# Write dataframe to .csv table
+write.csv(norm_vals_15, 'Count/OUTPUT/novaseq_basic_stats_Lib15.csv', row.names = FALSE, quote=FALSE)
+```
+
+### Lib15 Summary
+
+<font color="green">**Library 15 Summarized Count Data for Sequences and Barcodes (BC)**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_15_col1 <- norm_vals_15[,c(4,1,2,3)]
+
+knitr::kable(norm_vals_15_col1,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts'),
+  align = "lccl",
+  format.args = list(big.mark = ","))
+```
+
+**Summarize Library 16**
+```{r}
+## Library 16
+
+# Merge data objects together into single dataframe
+norm_vals_16 <- data.frame(sample=c("D02","D04",
+                                    "D12","E01","E02","E03","E04","E05","E06"),
+                        counts=c(sum(D02$D02),sum(D04$D04),sum(D12$D12),
+                                 sum(E01$E01),sum(E02$E02),sum(E03$E03),sum(E04$E04),sum(E05$E05),sum(E06$E06)),
+                        numBCs=c(length(D02$D02),length(D04$D04),length(D12$D12),length(E01$E01),length(E02$E02),
+                                 length(E03$E03),length(E04$E04),length(E05$E05),length(E06$E06)),
+                        sampledesc=c("D02 - Lib16 - T0 - Overnight Growth on LB",
+                                     "D04 - Lib16 - T0 - Growth on M9 - Full Supplement",
+                                     "D12 - Lib16 - T1 - Growth on M9 - 0.0 ug/ml TMP",
+                                     "E01 - Lib16 - T1 - Growth on M9 - 0.058 ug/ml TMP",
+                                     "E02 - Lib16 - T1 - Growth on M9 - 0.5 ug/ml TMP",
+                                     "E03 - Lib16 - T1 - Growth on M9 - 1.0 ug/ml TMP",
+                                     "E04 - Lib16 - T1 - Growth on M9 - 10.0 ug/ml TMP",
+                                     "E05 - Lib16 - T1 - Growth on M9 - 50.0 ug/ml TMP",
+                                     "E06 - Lib16 - T1 - Growth on M9 - 200.0 ug/ml TMP"),
+                        TMP=c("Overnight LB", "Full Supplement", "0-tmp", "0.058-tmp", "0.5-tmp",
+                              "1.0-tmp", "10-tmp", "50-tmp", "200-tmp"))
+```
+
+```{r echo=FALSE}
+# Write dataframe to .csv table
+write.csv(norm_vals_16, 'Count/OUTPUT/novaseq_basic_stats_Lib16.csv', row.names = FALSE, quote=FALSE)
+```
+
+### Lib16 Summary
+
+<font color="green">**Table of Summarized Count Data for Sequences and Barcodes (BC)**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_16_col1 <- norm_vals_16[,c(4,1,2,3)]
+
+knitr::kable(norm_vals_16_col1,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts'),
+  align = "lccl",
+  format.args = list(big.mark = ","))
+```
+
+## Raw BC Counts
+
+**Merge and prune BCs from the imported count data by sampling condition for each codon-version library.** Begin by combining the count data BCs from each sampling condition into a single dataframe for each library. Next, prune BCs to retain only those BCs with exactly 20 bp. Then, map the remaining BCs to the BC mapping file to determine how many BCs we were able to map relative to all BCs recovered. Finally, write the data summary to a .csv file and save in the working directory.
+
+### Merged BCs
+Merge the count data from each library for each sampling condition by barcode for downstream analysis.
+```{r}
+# Library 15
+BCs15 <- D01 %>%
+  full_join(D03,by="BC") %>%
+  full_join(D05,by="BC") %>%
+  full_join(D06,by="BC") %>%
+  full_join(D07,by="BC") %>%
+  full_join(D08,by="BC") %>%
+  full_join(D09,by="BC") %>%
+  full_join(D10,by="BC") %>%
+  full_join(D11,by="BC")
+
+# Library 16
+BCs16 <- D02 %>%
+  full_join(D04,by="BC") %>%
+  full_join(D12,by="BC") %>%
+  full_join(E01,by="BC") %>%
+  full_join(E02,by="BC") %>%
+  full_join(E03,by="BC") %>%
+  full_join(E04,by="BC") %>%
+  full_join(E05,by="BC") %>%
+  full_join(E06,by="BC")
+```
+
+<font color="green">**Preview of BCs count data with N/A for blank values**</font>
+```{r echo=FALSE}
+head(BCs15)
+head(BCs16)
+```
+
+**Total BCs:** Count the number of unique barcode for each library
+```{r class.output="goodCode"}
+# Count the number of unique barcodes for Library 15
+BCs15.count <- length(unique(BCs15$BC))
+format(BCs15.count, big.mark = ",")
+
+# Count the number of unique barcodes for Library 16
+BCs16.count <- length(unique(BCs16$BC))
+format(BCs16.count, big.mark = ",")
+```
+
+**Total BCs at Complementation:** Count the number of unique barcode for each library at complementation
+```{r class.output="goodCode"}
+# Lib15
+
+# Filter rows where D05 is not NA
+filtered_BCs15 <- BCs15[!is.na(BCs15$D05), ]
+
+# Count unique values in the BC column of the filtered data
+BCs15.D05.count <- length(unique(filtered_BCs15$BC))
+format(BCs15.D05.count, big.mark = ",")
+
+# Lib 16
+
+# Filter rows where D12 is not NA
+filtered_BCs16 <- BCs16[!is.na(BCs16$D12), ]
+
+# Count unique values in the BC column of the filtered data
+BCs16.D12.count <- length(unique(filtered_BCs16$BC))
+format(BCs16.D12.count, big.mark = ",")
+```
+
+### BC Pruning
+
+Remove unique BCs less than 20 nucleotides in length as these do not represent true BCs from designed pool.
+```{r class.output="goodCode"}
+# Lib15: Sum the count of unique BC lengths in the BCs objects
+BCs15.unique.table <- table(str_length(BCs15$BC))
+BCs15.unique.table
+
+# Lib16: Sum the count of unique BC lengths in the BCs objects
+BCs16.unique.table <- table(str_length(BCs16$BC))
+BCs16.unique.table
+```
+
+```{r}
+# Filter rows where the length of BC is greater than or equal to 20
+
+# Lib15
+BCs15.prune <- BCs15 %>%
+  filter(str_length(BC) >= 20)
+
+# Lib16
+BCs16.prune <- BCs16 %>%
+  filter(str_length(BC) >= 20)
+```
+
+```{r class.output="goodCode"}
+# Lib15: Sum the count of unique BC lengths in the BCprune objects
+BCs15.prune.unique.table <- table(str_length(BCs15.prune$BC))
+BCs15.prune.unique.table
+
+# Lib16: Sum the count of unique BC lengths in the BCprune objects
+BCs16.prune.unique.table <- table(str_length(BCs16.prune$BC))
+BCs16.prune.unique.table
+```
+
+**Total BCs:** Count the number of unique barcode for each library after pruning by BC length
+```{r class.output="goodCode"}
+# Count the number of unique barcodes for Library 15
+BCs15.prune.count <- length(unique(BCs15.prune$BC))
+format(BCs15.prune.count, big.mark = ",")
+
+# Count the number of unique barcodes for Library 16
+BCs16.prune.count <- length(unique(BCs16.prune$BC))
+format(BCs16.prune.count, big.mark = ",")
+```
+
+**Unique BCs between Codon Versions:** Count the number of unique barcode between both libraries after pruning by BC length
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+BCs.prune.shared <- merge(BCs15.prune, BCs16.prune, by = "BC", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+BCs.prune.shared.count <- length(unique(BCs.prune.shared$BC))
+format(BCs.prune.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+BCs.prune.unique <- bind_rows(
+  anti_join(BCs15.prune, BCs16.prune, by = "BC"),
+  anti_join(BCs16.prune, BCs15.prune, by = "BC"))
+
+# Count the number of unique BCs unique to one library or the other
+BCs.prune.unique.count <- length(unique(BCs.prune.unique$BC))
+format(BCs.prune.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+BCs.prune.all.count <- sum(BCs.prune.shared.count + BCs.prune.unique.count)
+format(BCs.prune.all.count, big.mark = ",")
+```
+
+**Total BCs at Complementation:** Count the number of unique barcode for each library at complementation after pruning
+```{r class.output="goodCode"}
+# Lib15
+
+# Filter rows where D05 is not NA
+prune_filtered_BCs15 <- BCs15.prune[!is.na(BCs15.prune$D05), ]
+
+# Count unique values in the BC column of the filtered data
+BCs15.D05.prune.count <- length(unique(prune_filtered_BCs15$BC))
+format(BCs15.D05.prune.count, big.mark = ",")
+
+# Lib 16
+
+# Filter rows where D12 is not NA
+prune_filtered_BCs16 <- BCs16.prune[!is.na(BCs16.prune$D12), ]
+
+# Count unique values in the BC column of the filtered data
+BCs16.D12.prune.count <- length(unique(prune_filtered_BCs16$BC))
+format(BCs16.D12.prune.count, big.mark = ",")
+```
+
+**Unique BCs between Codon Versions at Complementation:** Count the number of unique barcodes between both libraries after pruning by BC length for Complementation
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+BCs.comp.prune.shared <- merge(prune_filtered_BCs15, prune_filtered_BCs16, by = "BC", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+BCs.comp.prune.shared.count <- length(unique(BCs.comp.prune.shared$BC))
+format(BCs.comp.prune.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+BCs.comp.prune.unique <- bind_rows(
+  anti_join(prune_filtered_BCs15, prune_filtered_BCs16, by = "BC"),
+  anti_join(prune_filtered_BCs16, prune_filtered_BCs15, by = "BC"))
+
+# Count the number of unique BCs unique to one library or the other
+BCs.comp.prune.unique.count <- length(unique(BCs.comp.prune.unique$BC))
+format(BCs.comp.prune.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+BCs.comp.prune.all.count <- sum(BCs.comp.prune.shared.count + BCs.comp.prune.unique.count)
+format(BCs.comp.prune.all.count, big.mark = ",")
+```
+
+### BC Mapping
+
+Map each pruned BC to it's corresponding BC in the `BCs_mutID` mapping file. This links each BC (normalized and pruned) recovered in each count file with its identifying sequence information from the mapping file.
+```{r class.output="goodCode"}
+# Library 15
+BCs15_map <- inner_join(BCs_mutID_15,BCs15.prune,by="BC")
+
+# Library 16
+BCs16_map <- inner_join(BCs_mutID_16,BCs16.prune,by="BC")
+```
+
+### Mapped Reads & BCs
+
+Calculate the total number of reads and unique barcodes recovered from each sampling condition.
+```{r}
+# Lib15
+BCs15_map_frac <- BCs15_map
+
+# Sum the total reads recovered from each sampling condition:
+norm_vals_15$mappedcounts <- c(
+  sum(BCs15_map_frac$D01, na.rm=T),sum(BCs15_map_frac$D03, na.rm=T),sum(BCs15_map_frac$D05, na.rm=T),
+  sum(BCs15_map_frac$D06, na.rm=T),sum(BCs15_map_frac$D07, na.rm=T),sum(BCs15_map_frac$D08, na.rm=T),
+  sum(BCs15_map_frac$D09, na.rm=T),sum(BCs15_map_frac$D10, na.rm=T),sum(BCs15_map_frac$D11, na.rm=T))
+
+# Determine the number of unique barcodes recovered from each sampling condition:
+norm_vals_15$mappedBCs <- c(
+  sum(!is.na(BCs15_map_frac$D01)),
+  sum(!is.na(BCs15_map_frac$D03)),
+  sum(!is.na(BCs15_map_frac$D05)),
+  sum(!is.na(BCs15_map_frac$D06)),
+  sum(!is.na(BCs15_map_frac$D07)),
+  sum(!is.na(BCs15_map_frac$D08)),
+  sum(!is.na(BCs15_map_frac$D09)),
+  sum(!is.na(BCs15_map_frac$D10)),
+  sum(!is.na(BCs15_map_frac$D11)))
+```
+
+<font color="green">**Table of Summarized Count Data including Mapped Counts and Mapped BCs for each Sample Condition**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_15_col3 <- norm_vals_15[,c(4,1,2,3,6,7)]
+
+knitr::kable(norm_vals_15_col3,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts', 'Mapped Counts', 'Mapped BCs'),
+  align = "llccccc",
+  format.args = list(big.mark = ","),
+  digits = 2)
+```
+
+```{r}
+# Library 16
+BCs16_map_frac <- BCs16_map
+
+# Sum the total reads recovered from each sampling condition:
+norm_vals_16$mappedcounts <- c(
+  sum(BCs16_map_frac$D02, na.rm=T),sum(BCs16_map_frac$D04, na.rm=T),sum(BCs16_map_frac$D12, na.rm=T),
+  sum(BCs16_map_frac$E01, na.rm=T),sum(BCs16_map_frac$E02, na.rm=T),sum(BCs16_map_frac$E03, na.rm=T),
+  sum(BCs16_map_frac$E04, na.rm=T),sum(BCs16_map_frac$E05, na.rm=T),sum(BCs16_map_frac$E06, na.rm=T))
+
+# Determine the number of unique barcodes recovered from each sampling condition:
+norm_vals_16$mappedBCs <- c(
+  sum(!is.na(BCs16_map_frac$D02)),
+  sum(!is.na(BCs16_map_frac$D04)),
+  sum(!is.na(BCs16_map_frac$D12)),
+  sum(!is.na(BCs16_map_frac$E01)),
+  sum(!is.na(BCs16_map_frac$E02)),
+  sum(!is.na(BCs16_map_frac$E03)),
+  sum(!is.na(BCs16_map_frac$E04)),
+  sum(!is.na(BCs16_map_frac$E05)),
+  sum(!is.na(BCs16_map_frac$E06)))
+```
+
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_16_col3 <- norm_vals_16[,c(4,1,2,3,6,7)]
+
+knitr::kable(norm_vals_16_col3,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts', 'Mapped Counts', 'Mapped BCs'),
+  align = "llccccc",
+  format.args = list(big.mark = ","),
+  digits = 2)
+```
+
+### Frac Reads & BCs Mapped
+
+Calculate the fraction of mapped counts and BCs relative to total counts and BCs, respectively
+```{r}
+# Library 15
+
+# Calculate the fraction of mapped counts or barcodes relative to total counts or barcodes, respectively
+norm_vals_15 <- norm_vals_15 %>%
+  mutate(frac_mapped_counts=mappedcounts/counts,
+         frac_mapped_BC=mappedBCs/numBCs)
+```
+
+<font color="green">**Table of Summarized Count Data including Mapped Counts and Mapped BCs for each Sample Condition**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_15_col4 <- norm_vals_15[,c(4,1,2,3,6,7,8,9)]
+
+knitr::kable(norm_vals_15_col4,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts', 'Mapped Counts', 'Mapped BCs', 'Frac Mapped Counts', 'Frac Mapped BCs'),
+  align = "llccccccc",
+  format.args = list(big.mark = ","),
+  digits = 2)
+```
+
+```{r}
+# Library 16
+
+# Calculate the fraction of mapped counts or barcodes relative to total counts or barcodes, respectively
+norm_vals_16 <- norm_vals_16 %>%
+  mutate(frac_mapped_counts=mappedcounts/counts,
+         frac_mapped_BC=mappedBCs/numBCs)
+```
+
+<font color="green">**Table of Summarized Count Data including Mapped Counts and Mapped BCs for each Sample Condition**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_16_col4 <- norm_vals_16[,c(4,1,2,3,6,7,8,9)]
+
+knitr::kable(norm_vals_16_col4,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts', 'Mapped Counts', 'Mapped BCs', 'Frac Mapped Counts', 'Frac Mapped BCs'),
+  align = "llccccccc",
+  format.args = list(big.mark = ","),
+  digits = 2)
+```
+
+### Plot Mapped Reads & BCs
+
+Plot the mapped reads <font color="red">(match with a barcode)</font> as a fraction of the total reads.
+
+```{r}
+# Merge the two datasets and add the "Lib" column
+merged_norm_vals <- bind_rows(
+  norm_vals_15 %>% mutate(Lib = "Lib15"),
+  norm_vals_16 %>% mutate(Lib = "Lib16"))
+
+merged_norm_vals_sub <- merged_norm_vals %>%
+  select(5:10)
+
+# Create a new data frame for plotting
+merged_norm_vals_sub <- merged_norm_vals_sub %>%
+  filter(!grepl("Full Supplement|Overnight LB", TMP))
+
+# Multiply the "mean_frac_mapped_counts" and "mean_frac_mapped_BC" columns by 100
+merged_norm_vals_sub$frac_mapped_counts <- merged_norm_vals_sub$frac_mapped_counts * 100
+merged_norm_vals_sub$frac_mapped_BC <- merged_norm_vals_sub$frac_mapped_BC * 100
+```
+
+```{r}
+# Place variables in order for plotting
+frac_order <- c("0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")
+
+# Create custom labels for the x-axis
+frac_labels <- c("0", "0.058", "0.5", "1.0", "10", "50", "200")
+
+# Create the boxplot
+merged_norm_frac_read_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = frac_mapped_counts, fill = Lib)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.85), alpha = 0.8) +
+  xlab("Trimethoprim (μg/mL)") +
+  ylab("Fraction of Total Reads Mapped (%)") +
+  theme_minimal() + 
+  theme(
+    axis.line = element_line(colour = 'black', size = 0.5), 
+    axis.ticks = element_line(colour = "black", size = 0.5), 
+    plot.title = element_text(size = 14, hjust = 0.5), 
+    axis.text.x = element_text(size = 12), 
+    axis.text.y = element_text(size = 12), 
+    panel.background = element_blank(), 
+    axis.title.x = element_text(size = 12), 
+    axis.title.y = element_text(size = 16), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  scale_x_discrete(labels = unique(frac_labels)) +
+  scale_fill_manual(values = c("#0072B2", "#E69F00"))
+
+merged_norm_frac_read_plot
+```
+
+```{r}
+# Create the boxplot
+merged_norm_frac_BC_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = frac_mapped_BC, fill = Lib)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.85), alpha = 0.75) +
+  xlab("Trimethoprim (μg/mL)") +
+  ylab("Fraction of Total BCs Mapped (%)") +
+  theme_minimal() + 
+  theme(
+    axis.line = element_line(colour = 'black', size = 0.5), 
+    axis.ticks = element_line(colour = "black", size = 0.5), 
+    plot.title = element_text(size = 14, hjust = 0.5), 
+    axis.text.x = element_text(size = 12), 
+    axis.text.y = element_text(size = 12), 
+    panel.background = element_blank(), 
+    axis.title.x = element_text(size = 12), 
+    axis.title.y = element_text(size = 16),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  scale_x_discrete(labels = unique(frac_labels)) +
+  scale_fill_manual(values = c("#0072B2", "#E69F00"))
+
+merged_norm_frac_BC_plot
+```
+
+```{r}
+# Create the boxplot
+merged_norm_reads_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = mappedcounts, fill = Lib)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.85), alpha = 0.75) +
+  xlab("Trimethoprim (μg/mL)") +
+  ylab("Total Reads Mapped") +
+  theme_minimal() + 
+  theme(
+    axis.line = element_line(colour = 'black', size = 0.5), 
+    axis.ticks = element_line(colour = "black", size = 0.5), 
+    plot.title = element_text(size = 14, hjust = 0.5), 
+    axis.text.x = element_text(size = 12), 
+    axis.text.y = element_text(size = 12), 
+    panel.background = element_blank(), 
+    axis.title.x = element_text(size = 12), 
+    axis.title.y = element_text(size = 16),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 50000000), labels = label_comma()) +
+  scale_x_discrete(labels = unique(frac_labels)) +
+  scale_fill_manual(values = c("#0072B2", "#E69F00"))
+
+merged_norm_reads_plot
+```
+
+```{r}
+# Create the boxplot
+merged_norm_BC_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = mappedBCs, fill = Lib)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.85), alpha = 0.75) +
+  xlab("Trimethoprim (μg/mL)") +
+  ylab("Total BCs Mapped") +
+  theme_minimal() + 
+  theme(
+    axis.line = element_line(colour = 'black', size = 0.5), 
+    axis.ticks = element_line(colour = "black", size = 0.5), 
+    plot.title = element_text(size = 14, hjust = 0.5), 
+    axis.text.x = element_text(size = 12), 
+    axis.text.y = element_text(size = 12), 
+    panel.background = element_blank(), 
+    axis.title.x = element_text(size = 12), 
+    axis.title.y = element_text(size = 16),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 155000), labels = label_comma()) +
+  scale_x_discrete(labels = unique(frac_labels)) +
+  scale_fill_manual(values = c("#0072B2", "#E69F00"))
+
+merged_norm_BC_plot
+```
+
+```{r echo=FALSE}
+patch1 <- (merged_norm_reads_plot | merged_norm_frac_read_plot)/(merged_norm_BC_plot | merged_norm_frac_BC_plot)
+patch1
+```
+
+```{r echo=FALSE}
+ggsave(file="Count/PLOTS/Lib15.16.mean.reads.bcs.mapped.png", plot=patch1,
+       dpi=600, width = 16, height = 12, units = "in")
+```
+
+## Basic Checks
+
+With the count data from both libraries imported and merged, we can perform some basic checks to determine everything has been incorporated properly.
+
+### Mapping Barcodes
+
+**BCs matching mapping file (min. 1 Seq/BC):** How many of our barcodes (from count files) are in the mapping files for each library?
+```{r class.output="goodCode"}
+# Lib15 - Count number of barcodes (rows)
+format(nrow(BCs15_map), big.mark = ",")
+
+# Lib16 - Count number of barcodes (rows)
+format(nrow(BCs16_map), big.mark = ",")
+```
+
+**BCs matching mapping file for Complementation (min. 1 Seq/BC):**
+```{r class.output="goodCode"}
+# Lib15 - Filter rows where D05 is not NA
+BCs15_map_filtered <- BCs15_map[!is.na(BCs15_map$D05), ]
+
+# Count unique values in the BC column of the filtered data
+BCs15_map_filtered.count <- length(unique(BCs15_map_filtered$BC))
+format(BCs15_map_filtered.count, big.mark = ",")
+
+# Lib16 - Filter rows where D12 is not NA
+BCs16_map_filtered <- BCs16_map[!is.na(BCs16_map$D12), ]
+
+# Count unique values in the BC column of the filtered data
+BCs16_map_filtered.count <- length(unique(BCs16_map_filtered$BC))
+format(BCs16_map_filtered.count, big.mark = ",")
+```
+
+**Unique BCs matching mapping file between Codon Versions at Complementation:** Count the number of unique barcodes between both libraries after pruning by BC length for Complementation
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+BCs.comp.map.shared <- merge(BCs15_map_filtered, BCs16_map_filtered, by = "BC", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+BCs.comp.map.shared.count <- length(unique(BCs.comp.map.shared$BC))
+format(BCs.comp.map.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+BCs.comp.map.unique <- bind_rows(
+  anti_join(BCs15_map_filtered, BCs16_map_filtered, by = "BC"),
+  anti_join(BCs16_map_filtered, BCs15_map_filtered, by = "BC"))
+
+# Count the number of unique BCs unique to one library or the other
+BCs.comp.map.unique.count <- length(unique(BCs.comp.map.unique$BC))
+format(BCs.comp.map.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+BCs.comp.map.all.count <- sum(BCs.comp.map.shared.count + BCs.comp.map.unique.count)
+format(BCs.comp.map.all.count, big.mark = ",")
+```
+
+**Perfect BCs matching mapping file (min. 1 Seq/BC):** How many of our barcodes are associated with perfects (perfect sequence match with a designed homolog) for each unique library after filtering to the BC mapping file?
+```{r class.output="goodCode"}
+# Library 15
+BCs15_perf <- BCs15_map %>%
+  filter(mutations==0)
+
+# Count number of perfects (rows)
+format(nrow(BCs15_perf), big.mark = ",")
+
+# Library 16
+BCs16_perf <- BCs16_map %>%
+  filter(mutations==0)
+
+# Count number of perfects (rows)
+format(nrow(BCs16_perf), big.mark = ",")
+```
+
+**Perfect BCs matching mapping file for Complementation:**
+```{r class.output="goodCode"}
+# Library 15
+BCs15_perf_filtered <- BCs15_map_filtered %>%
+  filter(mutations==0)
+
+# Count unique values in the BC column of the filtered data
+BCs15_perf_filtered.count <- length(unique(BCs15_perf_filtered$BC))
+format(BCs15_perf_filtered.count, big.mark = ",")
+
+# Library 16
+BCs16_perf_filtered <- BCs16_map_filtered %>%
+  filter(mutations==0)
+
+# Count unique values in the BC column of the filtered data
+BCs16_perf_filtered.count <- length(unique(BCs16_perf_filtered$BC))
+format(BCs16_perf_filtered.count, big.mark = ",")
+```
+
+**Mutant BCs matching mapping file (min 1 Seq/BC):** How many of our barcodes are associated with mutants (sequence contains at least 1 mutation from a designed homolog) for each unique library after filtering to the BC mapping file?
+```{r class.output="goodCode"}
+# Library 15
+BCs15_mutant <- BCs15_map %>%
+  filter(mutations!=0)
+
+# Count number of perfects (rows)
+format(nrow(BCs15_mutant), big.mark = ",")
+
+# Library 16
+BCs16_mutant <- BCs16_map %>%
+  filter(mutations!=0)
+
+# Count number of perfects (rows)
+format(nrow(BCs16_mutant), big.mark = ",")
+```
+
+**Mutant BCs matching mapping file for Complementation:**
+```{r class.output="goodCode"}
+# Library 15
+BCs15_mut_filtered <- BCs15_map_filtered %>%
+  filter(mutations!=0)
+
+# Count unique values in the BC column of the filtered data
+BCs15_mut_filtered.count <- length(unique(BCs15_mut_filtered$BC))
+format(BCs15_mut_filtered.count, big.mark = ",")
+
+# Library 16
+BCs16_mut_filtered <- BCs16_map_filtered %>%
+  filter(mutations!=0)
+
+# Count unique values in the BC column of the filtered data
+BCs16_mut_filtered.count <- length(unique(BCs16_mut_filtered$BC))
+format(BCs16_mut_filtered.count, big.mark = ",")
+```
+
+**Mutant Counts by Distance (min. 1 Seq/BC):** Summarize the sequence counts across mapped barcodes at numerous mutation levels:
+```{r}
+# Define the columns we want to summarize
+L15.columns_to_summarize <- c("D01", "D03", "D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+# Create a function to sum values for multiple columns
+L15.sum_columns <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L15.columns_to_summarize), ~sum(., na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Sum values for each condition
+L15.summary_all <- bind_rows(
+  BCs15_map_filtered %>% filter(mutations == 0) %>% L15.sum_columns("mutations == 0"),
+  BCs15_map_filtered %>% filter(mutations == 1) %>% L15.sum_columns("mutations == 1"),
+  BCs15_map_filtered %>% filter(mutations >= 2 & mutations <= 5) %>% L15.sum_columns("mutations 2-5"),
+  BCs15_map_filtered %>% filter(mutations >= 6 & mutations <= 50) %>% L15.sum_columns("mutations 6-50"),
+  BCs15_map_filtered %>% filter(mutations >= 51 & mutations <= 100) %>% L15.sum_columns("mutations 51-100"),
+  BCs15_map_filtered %>% filter(mutations > 100) %>% L15.sum_columns("mutations > 100")
+)
+
+# Add a total row to the sum table
+L15.summary_all_with_total <- L15.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total sum for each column
+L15.summary_percentage <- L15.summary_all %>%
+  mutate(across(all_of(L15.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L15.summary_percentage_with_total <- L15.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L15.summary_all_rounded <- L15.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+L15.summary_percentage_rounded <- L15.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the sum table
+print(L15.summary_all_rounded, n = Inf, width = Inf)
+```
+
+```{r}
+print(L15.summary_percentage_rounded, n = Inf, width = Inf)
+```
+
+```{r}
+# Define the columns we want to summarize
+L16.columns_to_summarize <- c("D02", "D04", "D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Create a function to sum values for multiple columns
+L16.sum_columns <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L16.columns_to_summarize), ~sum(., na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Sum values for each condition
+L16.summary_all <- bind_rows(
+  BCs16_map_filtered %>% filter(mutations == 0) %>% L16.sum_columns("mutations == 0"),
+  BCs16_map_filtered %>% filter(mutations == 1) %>% L16.sum_columns("mutations == 1"),
+  BCs16_map_filtered %>% filter(mutations >= 2 & mutations <= 5) %>% L16.sum_columns("mutations 2-5"),
+  BCs16_map_filtered %>% filter(mutations >= 6 & mutations <= 50) %>% L16.sum_columns("mutations 6-50"),
+  BCs16_map_filtered %>% filter(mutations >= 51 & mutations <= 100) %>% L16.sum_columns("mutations 51-100"),
+  BCs16_map_filtered %>% filter(mutations > 100) %>% L16.sum_columns("mutations > 100")
+)
+
+# Add a total row to the sum table
+L16.summary_all_with_total <- L16.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total sum for each column
+L16.summary_percentage <- L16.summary_all %>%
+  mutate(across(all_of(L16.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L16.summary_percentage_with_total <- L16.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L16.summary_all_rounded <- L16.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+L16.summary_percentage_rounded <- L16.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the sum table
+print(L16.summary_all_rounded, n = Inf, width = Inf)
+```
+
+```{r}
+print(L16.summary_percentage_rounded, n = Inf, width = Inf)
+```
+
+### Mapping Perfects
+
+**Unique Perfects (min. 1 Seq/BC):** How many unique perfects did we recover from all sampling conditions for each library?
+```{r class.output="goodCode"}
+# Library 15
+perf_uniq_15 <- BCs15_map %>%
+  filter(mutations==0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(perf_uniq_15, big.mark = ",")
+
+# Library 16
+perf_uniq_16 <- BCs16_map %>%
+  filter(mutations==0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(perf_uniq_16, big.mark = ",")
+```
+
+### Mapping Mutants
+
+**Unique Mutants (min 1 Seq/BC):** How many unique mutants did we recover from all sampling conditions for unique libraries?
+```{r class.output="goodCode"}
+# Library 15
+mutant_15 <- BCs15_map %>%
+  filter(mutations!=0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(mutant_15, big.mark = ",")
+
+# Library 16
+mutant_16 <- BCs16_map %>%
+  filter(mutations!=0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(mutant_16, big.mark = ",")
+```
+
+### Merged Libraries
+
+The following section merges Lib15 and Lib16 based on shared "mutID" and sums the number of unique perfects shared between libraries. It also merges Lib15 and Lib16 based on "mutIDs" unique to each library and sums the number of perfects unique to one library or the other. Finally, it sums the total number of unique perfects recovered that are either shared between libraries or unique to one library or the other.
+
+<font color="red">**NOTE:** This section is suppressed by default to save processing time and resources. Re-evaluate as needed.</font>
+
+#### Shared Perfects
+
+Count the number of shared perfects (mutations == 0) recovered between libraries.
+```{r class.output="goodCode", eval=FALSE}
+# Merge the mutIDinfo datasets but keep only the mutIDs shared between libraries
+BCs_mutID_perfects.shared <- merge(BCs15_map, BCs16_map, by = "mutID", all = FALSE)
+
+# Retain only the rows with a specific value in the "specific_column" column
+raw_data.shared <- BCs_mutID_perfects.shared %>%
+  filter(mutations.x == 0)
+
+# Count the number of perfects (mutations == 0) shared between both libraries
+BCs_mutID_perfects.shared.count <- length(unique(raw_data.shared$mutID))
+format(BCs_mutID_perfects.shared.count, big.mark = ",")
+```
+
+#### Unique Perfects
+
+Also count the number of perfect sequences unique to one or the other library (mutations == 0).
+```{r class.output="goodCode", eval=FALSE}
+# Merge the mutIDinfo datasets but retain only the mutIDs unique to one library or the other
+BCs_mutID_perfects.unique <- bind_rows(
+  anti_join(BCs15_map, BCs16_map, by = "mutID"),
+  anti_join(BCs16_map, BCs15_map, by = "mutID"))
+
+# Retain only the rows with a specific value in the "specific_column" column
+raw_data.unique <-BCs_mutID_perfects.unique %>%
+  filter(mutations == 0)
+
+# Count the number of perfects (mutations == 0) unique to one library or the other
+BCs_mutID_perfects.unique.count <- length(unique(raw_data.unique$mutID))
+format(BCs_mutID_perfects.unique.count, big.mark = ",")
+```
+
+#### Total Perfects
+
+Count the number of shared and unique perfects recovered for both codon version libraries.
+```{r class.output="goodCode", eval=FALSE}
+# Sum the number of shared and unique perfects recovered for both codon version libraries
+BCs_mutID_perfects.15.16.all.count <- sum(BCs_mutID_perfects.shared.count + BCs_mutID_perfects.unique.count)
+format(BCs_mutID_perfects.15.16.all.count, big.mark = ",")
+```
+
+## BC Filtering
+
+Up to this point, raw BCs have been pruned by BC length and all remaining BC counts have been normalized against sequence reads at **"T0 - M9 - Full Supplement"**. Here, we'll start by adding the raw count values, normalized count values, and log2-FC values for each BC to the `BCmut` object that represent the pre-filtered BC counts. Then, we'll filter BCs from our library datasets based on a minimum sequence count threshold across sampling conditions for use in all downstream analyses. **We use a minimum cutoff of 10 sequence reads per barcode.**
+
+### Pre-Filtered BCs
+
+Count the number of unique BCs prior to filtering by minimum sequence count:
+```{r class.output="goodCode"}
+# Pre-Filtered BC Counts by Library
+
+# Count the number of BCs prior to filtering by minimum sequence count
+BCmut_15.pre.count <- BCs15_map %>% nrow()
+format(BCmut_15.pre.count, big.mark = ",")
+
+# Count the number of BCs prior to filtering by minimum sequence count
+BCmut_16.pre.count <- BCs16_map %>% nrow()
+format(BCmut_16.pre.count, big.mark = ",")
+```
+
+### Filtered BCs
+
+Determine the number of unique barcodes based on a minimum sequence count threshold across sampling conditions. Filter the barcodes by a minimum threshold of sequence reads per unique barcode. In this case, we use a minimum cutoff of 10 sequence reads per barcode:
+
+**Lib15 BC Count**
+```{r class.output="goodCode"}
+# Filter unique barcodes by minimum sequence count. This code uses "or" such that if any of the sampling conditions contain at least 10 sequences counts/barcode, then the barcode is retained for the full dataset.
+
+# Lib15
+BCs15_map <- BCs15_map %>%
+  filter(D01>9 | D03>9 | D05>9 | D06>9 | D07>9 | D08>9 | D09>9 | D10>9 | D11>9)
+
+# Count the number of BCs remaining after filtering by minimum sequence count
+BCs15_map.count <- BCs15_map %>% nrow()
+format(BCs15_map.count, big.mark = ",")
+
+# Lib16
+BCs16_map <- BCs16_map %>%
+  filter(D02>9 | D04>9 | D12>9 | E01>9 | E02>9 | E03>9 | E04>9 | E05>9 | E06>9)
+
+# Count the number of BCs remaining after filtering by minimum sequence count
+BCs16_map.count <- BCs16_map %>% nrow()
+format(BCs16_map.count, big.mark = ",")
+```
+
+Confirm that all unique BCs match the 20-bp length requirement after filtering by minimum sequence count
+```{r class.output="goodCode"}
+# Lib15: Sum the count of unique BCs that match the 20-bp length requirement in the BCs15_map object
+BC_filter15.unique.table <- table(str_length(BCs15_map$BC))
+format(BC_filter15.unique.table, big.mark = ",")
+
+# Lib16: Sum the count of unique BCs that match the 20-bp length requirement in the BCs16_map object
+BC_filter16.unique.table <- table(str_length(BCs16_map$BC))
+format(BC_filter16.unique.table, big.mark = ",")
+```
+
+**BCs matching mapping file for Complementation (min. 10 Seq/BC):**
+```{r class.output="goodCode"}
+# Lib15 - Filter rows where D05 is not NA
+BCs15_map_filtered <- BCs15_map[!is.na(BCs15_map$D05), ]
+
+# Count unique values in the BC column of the filtered data
+BCs15_map_filtered.count <- length(unique(BCs15_map_filtered$BC))
+format(BCs15_map_filtered.count, big.mark = ",")
+
+# Lib16 - Filter rows where D12 is not NA
+BCs16_map_filtered <- BCs16_map[!is.na(BCs16_map$D12), ]
+
+# Count unique values in the BC column of the filtered data
+BCs16_map_filtered.count <- length(unique(BCs16_map_filtered$BC))
+format(BCs16_map_filtered.count, big.mark = ",")
+```
+
+**Unique BCs matching mapping file between Codon Versions at Complementation:** Count the number of unique barcodes between both libraries after pruning by BC length for Complementation
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+BCs.comp.map.shared <- merge(BCs15_map_filtered, BCs16_map_filtered, by = "BC", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+BCs.comp.map.shared.count <- length(unique(BCs.comp.map.shared$BC))
+format(BCs.comp.map.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+BCs.comp.map.unique <- bind_rows(
+  anti_join(BCs15_map_filtered, BCs16_map_filtered, by = "BC"),
+  anti_join(BCs16_map_filtered, BCs15_map_filtered, by = "BC"))
+
+# Count the number of unique BCs unique to one library or the other
+BCs.comp.map.unique.count <- length(unique(BCs.comp.map.unique$BC))
+format(BCs.comp.map.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+BCs.comp.map.all.count <- sum(BCs.comp.map.shared.count + BCs.comp.map.unique.count)
+format(BCs.comp.map.all.count, big.mark = ",")
+```
+
+**Filtered Unique Perfect BCs:** How many unique perfects BCs did we recover from all sampling conditions for each library after filtering by minimum sequence count?
+```{r class.output="goodCode"}
+# Lib15: Count the number of BCs remaining after filtering by minimum sequence count
+BCs15_map.BC.perfect.count <- BCs15_map %>%
+  filter(mutations == 0) %>%
+  distinct(BC) %>%
+  nrow()
+format(BCs15_map.BC.perfect.count, big.mark = ",")
+
+# Lib16: Count the number of BCs remaining after filtering by minimum sequence count
+BCs16_map.BC.perfect.count <- BCs16_map %>%
+  filter(mutations == 0) %>%
+  distinct(BC) %>%
+  nrow()
+format(BCs16_map.BC.perfect.count, big.mark = ",")
+```
+
+**Perfect BCs matching mapping file for Complementation:**
+```{r class.output="goodCode"}
+# Library 15
+BCs15_perf_filtered <- BCs15_map_filtered %>%
+  filter(mutations==0)
+
+# Count unique values in the BC column of the filtered data
+BCs15_perf_filtered.count <- length(unique(BCs15_perf_filtered$BC))
+format(BCs15_perf_filtered.count, big.mark = ",")
+
+# Library 16
+BCs16_perf_filtered <- BCs16_map_filtered %>%
+  filter(mutations==0)
+
+# Count unique values in the BC column of the filtered data
+BCs16_perf_filtered.count <- length(unique(BCs16_perf_filtered$BC))
+format(BCs16_perf_filtered.count, big.mark = ",")
+```
+
+**Unique Perfect BCs matching mapping file between Codon Versions at Complementation:**
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+BCs.comp.perf.shared <- merge(BCs15_perf_filtered, BCs16_perf_filtered, by = "BC", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+BCs.comp.perf.shared.count <- length(unique(BCs.comp.perf.shared$BC))
+format(BCs.comp.perf.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+BCs.comp.perf.unique <- bind_rows(
+  anti_join(BCs15_perf_filtered, BCs16_perf_filtered, by = "BC"),
+  anti_join(BCs16_perf_filtered, BCs15_perf_filtered, by = "BC"))
+
+# Count the number of unique BCs unique to one library or the other
+BCs.comp.perf.unique.count <- length(unique(BCs.comp.perf.unique$BC))
+format(BCs.comp.perf.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+BCs.comp.perf.all.count <- sum(BCs.comp.perf.shared.count + BCs.comp.perf.unique.count)
+format(BCs.comp.perf.all.count, big.mark = ",")
+```
+
+**Filtered Unique Mutant BCs:** How many unique mutant BCs did we recover from all sampling conditions for each library after filtering by minimum sequence count?
+```{r class.output="goodCode"}
+# Library 15
+BCs15_mut_filtered <- BCs15_map_filtered %>%
+  filter(mutations!=0)
+
+# Count unique values in the BC column of the filtered data
+BCs15_mut_filtered.count <- length(unique(BCs15_mut_filtered$BC))
+format(BCs15_mut_filtered.count, big.mark = ",")
+
+# Library 16
+BCs16_mut_filtered <- BCs16_map_filtered %>%
+  filter(mutations!=0)
+
+# Count unique values in the BC column of the filtered data
+BCs16_mut_filtered.count <- length(unique(BCs16_mut_filtered$BC))
+format(BCs16_mut_filtered.count, big.mark = ",")
+```
+
+**Unique Mutant BCs matching mapping file between Codon Versions at Complementation:**
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+BCs.comp.mut.shared <- merge(BCs15_mut_filtered, BCs16_mut_filtered, by = "BC", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+BCs.comp.mut.shared.count <- length(unique(BCs.comp.mut.shared$BC))
+format(BCs.comp.mut.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+BCs.comp.mut.unique <- bind_rows(
+  anti_join(BCs15_mut_filtered, BCs16_mut_filtered, by = "BC"),
+  anti_join(BCs16_mut_filtered, BCs15_mut_filtered, by = "BC"))
+
+# Count the number of unique BCs unique to one library or the other
+BCs.comp.mut.unique.count <- length(unique(BCs.comp.mut.unique$BC))
+format(BCs.comp.mut.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+BCs.comp.mut.all.count <- sum(BCs.comp.mut.shared.count + BCs.comp.mut.unique.count)
+format(BCs.comp.mut.all.count, big.mark = ",")
+```
+
+
+```{r}
+# Define the columns we want to summarize
+L15.columns_to_summarize <- c("D01", "D03", "D05", "D06", "D07", "D08", "D09", "D10", "D11",
+                              "D02", "D04", "D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Create a function to count unique BCs for multiple columns
+L15.count_unique_BC <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L15.columns_to_summarize), 
+                     ~sum(. > 0, na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Count unique BCs for each condition
+L15.summary_all <- bind_rows(
+  BCs.comp.mut.unique %>% filter(mutations == 0) %>% L15.count_unique_BC("mutations == 0"),
+  BCs.comp.mut.unique %>% filter(mutations == 1) %>% L15.count_unique_BC("mutations == 1"),
+  BCs.comp.mut.unique %>% filter(mutations >= 2 & mutations <= 5) %>% L15.count_unique_BC("mutations 2-5"),
+  BCs.comp.mut.unique %>% filter(mutations >= 6 & mutations <= 50) %>% L15.count_unique_BC("mutations 6-50"),
+  BCs.comp.mut.unique %>% filter(mutations >= 51 & mutations <= 100) %>% L15.count_unique_BC("mutations 51-100"),
+  BCs.comp.mut.unique %>% filter(mutations > 100) %>% L15.count_unique_BC("mutations > 100")
+)
+
+# Add a total row to the count table
+L15.summary_all_with_total <- L15.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total count for each column
+L15.summary_percentage <- L15.summary_all %>%
+  mutate(across(all_of(L15.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L15.summary_percentage_with_total <- L15.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L15.summary_all_rounded <- L15.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 0)))
+
+L15.summary_percentage_rounded <- L15.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the count table
+print(L15.summary_all_rounded, n = Inf, width = Inf)
+
+# Print the percentage table
+print(L15.summary_percentage_rounded, n = Inf, width = Inf)
+```
+
+**Average Mutant BC per Perfect mutID:**
+```{r}
+
+```
+
+**Mutant BCs matching mapping file for Complementation:**
+```{r class.output="goodCode"}
+# Library 15
+BCs15_mut_filtered <- BCs15_map_filtered %>%
+  filter(mutations!=0)
+
+# Count unique values in the BC column of the filtered data
+BCs15_mut_filtered.count <- length(unique(BCs15_mut_filtered$BC))
+format(BCs15_mut_filtered.count, big.mark = ",")
+
+# Library 16
+BCs16_mut_filtered <- BCs16_map_filtered %>%
+  filter(mutations!=0)
+
+# Count unique values in the BC column of the filtered data
+BCs16_mut_filtered.count <- length(unique(BCs16_mut_filtered$BC))
+format(BCs16_mut_filtered.count, big.mark = ",")
+```
+
+**Mutant Counts by Distance (min. 1 Seq/BC):** Summarize the sequence counts across mapped barcodes at numerous mutation levels:
+```{r}
+# Define the columns we want to summarize
+L15.columns_to_summarize <- c("D01", "D03", "D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+# Create a function to sum values for multiple columns
+L15.sum_columns <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L15.columns_to_summarize), ~sum(., na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Sum values for each condition
+L15.summary_all <- bind_rows(
+  BCs15_map_filtered %>% filter(mutations == 0) %>% L15.sum_columns("mutations == 0"),
+  BCs15_map_filtered %>% filter(mutations == 1) %>% L15.sum_columns("mutations == 1"),
+  BCs15_map_filtered %>% filter(mutations >= 2 & mutations <= 5) %>% L15.sum_columns("mutations 2-5"),
+  BCs15_map_filtered %>% filter(mutations >= 6 & mutations <= 50) %>% L15.sum_columns("mutations 6-50"),
+  BCs15_map_filtered %>% filter(mutations >= 51 & mutations <= 100) %>% L15.sum_columns("mutations 51-100"),
+  BCs15_map_filtered %>% filter(mutations > 100) %>% L15.sum_columns("mutations > 100")
+)
+
+# Add a total row to the sum table
+L15.summary_all_with_total <- L15.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total sum for each column
+L15.summary_percentage <- L15.summary_all %>%
+  mutate(across(all_of(L15.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L15.summary_percentage_with_total <- L15.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L15.summary_all_rounded <- L15.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+L15.summary_percentage_rounded <- L15.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the sum table
+print(L15.summary_all_rounded, n = Inf, width = Inf)
+```
+
+```{r}
+print(L15.summary_percentage_rounded, n = Inf, width = Inf)
+```
+
+```{r}
+# Define the columns we want to summarize
+L16.columns_to_summarize <- c("D02", "D04", "D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Create a function to sum values for multiple columns
+L16.sum_columns <- function(data, condition_name) {
+  data %>%
+    summarise(across(all_of(L16.columns_to_summarize), ~sum(., na.rm = TRUE))) %>%
+    mutate(condition = condition_name) %>%
+    select(condition, everything())
+}
+
+# Sum values for each condition
+L16.summary_all <- bind_rows(
+  BCs16_map_filtered %>% filter(mutations == 0) %>% L16.sum_columns("mutations == 0"),
+  BCs16_map_filtered %>% filter(mutations == 1) %>% L16.sum_columns("mutations == 1"),
+  BCs16_map_filtered %>% filter(mutations >= 2 & mutations <= 5) %>% L16.sum_columns("mutations 2-5"),
+  BCs16_map_filtered %>% filter(mutations >= 6 & mutations <= 50) %>% L16.sum_columns("mutations 6-50"),
+  BCs16_map_filtered %>% filter(mutations >= 51 & mutations <= 100) %>% L16.sum_columns("mutations 51-100"),
+  BCs16_map_filtered %>% filter(mutations > 100) %>% L16.sum_columns("mutations > 100")
+)
+
+# Add a total row to the sum table
+L16.summary_all_with_total <- L16.summary_all %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Calculate the percentage of total sum for each column
+L16.summary_percentage <- L16.summary_all %>%
+  mutate(across(all_of(L16.columns_to_summarize), 
+                ~. / sum(., na.rm = TRUE) * 100, 
+                .names = "{col}_pct"))
+
+# Add a total row to the percentage table (will sum to 100 for each column)
+L16.summary_percentage_with_total <- L16.summary_percentage %>%
+  select(condition, ends_with("_pct")) %>%
+  bind_rows(summarise(., across(where(is.numeric), sum), condition = "Total"))
+
+# Round the values for better readability
+L16.summary_all_rounded <- L16.summary_all_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+L16.summary_percentage_rounded <- L16.summary_percentage_with_total %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+# Print the sum table
+print(L16.summary_all_rounded, n = Inf, width = Inf)
+```
+
+```{r}
+print(L16.summary_percentage_rounded, n = Inf, width = Inf)
+```
+
+
+
+
+
+
+
+
+
+
+
+**Unique Perfects mutID:** How many unique perfects (designed homologs with 0 mutations) did we recover from all sampling conditions for each library after filtering by minimum sequence count?
+```{r class.output="goodCode"}
+# Lib15
+perf_filtered_uniq_15 <- BCs15_map %>%
+  filter(mutations==0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(perf_filtered_uniq_15, big.mark = ",")
+
+# Lib16
+perf_filtered_uniq_16 <- BCs16_map %>%
+  filter(mutations==0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(perf_filtered_uniq_16, big.mark = ",")
+```
+
+**Unique Perfects mutID by TMP Treatment:** How many unique perfects did we recover from each TMP sampling treatment for each library after filtering by minimum sequence count?
+```{r class.output="goodCode"}
+## Library 15
+
+# Columns to count distinct values for
+columns_to_count15 <- c("D05", "D06", "D07", "D08", "D09", "D10", "D11")
+
+# Count unique values in "mutID" associated with each column
+counts_table15 <- BCs15_map %>%
+  filter(mutations == 0) %>%
+  summarise(across(all_of(columns_to_count15), ~ n_distinct(mutID[. > 0])))
+
+# Display the counts table
+print(counts_table15)
+```
+
+```{r class.output="goodCode"}
+## Library 16
+
+# Columns to count distinct values for
+columns_to_count16 <- c("D12", "E01", "E02", "E03", "E04", "E05", "E06")
+
+# Count unique values in "mutID" associated with each column
+counts_table16 <- BCs16_map %>%
+  filter(mutations == 0) %>%
+  summarise(across(all_of(columns_to_count16), ~ n_distinct(mutID[. > 0])))
+
+# Display the counts table
+print(counts_table16)
+```
+
+**Unique Mutants:** How many unique mutants did we recover from all sampling conditions for unique libraries after filtering by minimum sequence count?
+```{r class.output="goodCode"}
+# Library 15
+mutant_filtered_15 <- BCs15_map %>%
+  filter(mutations!=0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(mutant_filtered_15, big.mark = ",")
+
+# Library 16
+mutant_filtered_16 <- BCs16_map %>%
+  filter(mutations!=0) %>%
+  select(mutID) %>%
+  distinct() %>%
+  nrow()
+format(mutant_filtered_16, big.mark = ",")
+```
+
+The following section merges the filtered versions of Lib15 and Lib16 based on shared "mutID" and sums the number of unique perfects shared between libraries. It also merges Lib15 and Lib16 based on "mutIDs" unique to each library and sums the number of perfects unique to one library or the other. Finally, it sums the total number of unique perfects recovered that are either shared between libraries or unique to one library or the other.
+
+<font color="red">**NOTE:** This section is suppressed by default to save processing time and resources. Re-evaluate as needed.</font>
+
+Count the number of shared perfects (mutations == 0) recovered between libraries after filtering by minimum sequence count.
+```{r class.output="goodCode", eval=FALSE}
+# Merge the mutIDinfo datasets but keep only the mutIDs shared between libraries
+BCs_mutID_filtered_perfects.shared <- merge(BCs15_map, BCs16_map, by = "mutID", all = FALSE)
+
+# Retain only the rows with a specific value in the "specific_column" column
+filtered_data.shared <- BCs_mutID_filtered_perfects.shared %>%
+  filter(mutations.x == 0)
+
+# Count the number of perfects (mutations == 0) shared between both libraries
+BCs_mutID_filtered_perfects.shared.count <- length(unique(filtered_data.shared$mutID))
+format(BCs_mutID_filtered_perfects.shared.count, big.mark = ",")
+```
+
+Also count the number of perfect sequences unique to one or the other library (mutations == 0) after filtering by minimum sequence count.
+```{r class.output="goodCode", eval=FALSE}
+# Merge the mutIDinfo datasets but retain only the mutIDs unique to one library or the other
+BCs_mutID_filtered_perfects.unique <- bind_rows(
+  anti_join(BCs15_map, BCs16_map, by = "mutID"),
+  anti_join(BCs16_map, BCs15_map, by = "mutID"))
+
+# Retain only the rows with a specific value in the "specific_column" column
+filtered_data.unique <-BCs_mutID_filtered_perfects.unique %>%
+  filter(mutations == 0)
+
+# Count the number of perfects (mutations == 0) unique to one library or the other
+BCs_mutID_filtered_perfects.unique.count <- length(unique(filtered_data.unique$mutID))
+format(BCs_mutID_filtered_perfects.unique.count, big.mark = ",")
+```
+
+Sum the shared and unique counts for total perfect sequences recovered after filtering by minimum sequence count.
+```{r class.output="goodCode", eval=FALSE}
+# Sum the number of shared and unique perfects recovered for both codon version libraries
+BCs_mutID_filtered_perfects.15.16.all.count <- sum(BCs_mutID_filtered_perfects.shared.count + BCs_mutID_filtered_perfects.unique.count)
+format(BCs_mutID_filtered_perfects.15.16.all.count, big.mark = ",")
+```
+
+## Normalization
+
+Count data needs to be normalized across sampling conditions prior to making any downstream comparisons. Here, we scale the sequence counts against the "T0-Overnight Growth on LB" sampling condition. This represents "D01" for Lib15 and "D02" for Lib16.
+
+### Scaling Counts by Condition
+
+**Lib15 Scaling:** Create a scaling value to normalize all sequence count data by the total number of sequences at "T0 - Growth on M9 - Full Supplement" sample condition (Lib15: D03; Lib16: D04).
+```{r}
+# Calculating the scaling factor for each sampling condition based on D03 (T0-M9-Full Supplement) as the standard
+norm_scaling_15 <- rep.int(norm_vals_15$counts[2],nrow(norm_vals_15))/norm_vals_15$counts
+
+# Add the scaling values as a column to the "norm_vals_15" dataframe
+norm_vals_15$scaling <- norm_scaling_15
+```
+
+<font color="green">**Table of Summarized Count Data including the Scaling Value for each Sample Condition**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_15_col2 <- norm_vals_15[,c(4,1,2,3,6,7,10)]
+
+knitr::kable(norm_vals_15_col2,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts', 'Mapped Counts', 'Mapped BCs', 'Scaling'),
+  align = "llccc",
+  format.args = list(big.mark = ","),
+  digits = 2)
+```
+
+**Lib16 Scaling**
+```{r}
+# Calculate scaling factor for each sampling condition based on D04 (T0 - M9 - Full Supplement) as the standard
+norm_scaling_16 <- rep.int(norm_vals_16$counts[2],nrow(norm_vals_16))/norm_vals_16$counts
+
+# Add the scaling values as a column to the "norm_vals_16" dataframe
+norm_vals_16$scaling <- norm_scaling_16
+```
+
+<font color="green">**Table of Summarized Count Data including the Scaling Value for each Sample Condition**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+norm_vals_16_col2 <- norm_vals_16[,c(4,1,2,3,6,7,10)]
+
+knitr::kable(norm_vals_16_col2,
+  col.names = c('Sample Conditions', 'Sample ID', 'Seq Counts', 'BC Counts', 'Mapped Counts', 'Mapped BCs', 'Scaling'),
+  align = "llccc",
+  format.args = list(big.mark = ","),
+  digits = 2)
+```
+
+### Scaling Counts by Barcode
+
+**Lib15 BC Scaling**
+
+<font color="green">**The following table displays a preview of the original count values by unique barcode:**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+BCs15_head <- head(BCs15_map[, c(1, 9:17)])
+
+knitr::kable(BCs15_head,
+  col.names = c('BC','D01', 'D03', 
+                'D05', 'D06', 'D07', 'D08', 'D09', 'D10', 'D11'),
+  align = "lccccccccccc",
+  format.args = list(big.mark = ","),
+  digits = 0)
+```
+
+For each sample, make a normalized counts value based on sequencing depth using the scaling values derived for each sampling condition in the table above. 
+```{r}
+# Make new columns for the normalized counts in the BCs object:
+oldnames15 <- colnames(BCs15_map)
+newnamesfrac15 = c('D01n', 'D03n', 
+                   'D05n', 'D06n', 'D07n', 'D08n', 'D09n', 'D10n', 'D11n')
+
+# Add the new columns to the BCs object based on the number of original columns for sampling conditions:
+numcol_15 <- ncol(BCs15_map)
+D01index = which( colnames(BCs15_map)=="D01" )
+
+# For each sample, re-scale the number of reads by relative sequencing depth of the sample using the scaling values in the norm_vals object:
+for (i in 1:9){
+  BCs15_map[,numcol_15+i] <- BCs15_map[,D01index+i-1]*as.numeric(norm_vals_15$scaling[i])
+}
+
+# Add the new column names to the BCs object:
+colnames(BCs15_map) <- c(oldnames15,newnamesfrac15)
+```
+
+<font color="green">**The following table displays a preview of the normalized count values by unique barcode:**</font>
+```{r echo=FALSE}
+BCs_norm_15 <- BCs15_map[,c(1,18:26)]
+
+# Display dataframe with kable formatting
+BCs_norm_head_15 <- head(BCs_norm_15)
+
+knitr::kable(BCs_norm_head_15,
+  col.names = c('BC', 'D01n', 'D03n', 'D05n', 'D06n', 'D07n', 'D08n', 'D09n', 'D10n', 'D11n'),
+  align = "lccccccccccc",
+  format.args = list(big.mark = ","),
+  digits = 0)
+```
+
+**Lib16 BC Scaling**
+
+<font color="green">**The following table displays a preview of the original count values by unique barcode:**</font>
+```{r echo=FALSE}
+# Display dataframe with kable formatting
+BCs16_head <- head(BCs16_map[, c(1, 9:17)])
+
+knitr::kable(BCs16_head,
+  col.names = c('BC', 'D02', 'D04', 'D12', 'E01', 'E02', 'E03', 'E04', 'E05', 'E06'),
+  align = "lccccccccccc",
+  format.args = list(big.mark = ","),
+  digits = 0)
+```
+
+For each sample, make a normalized counts value based on sequencing depth using the scaling values derived for each sampling condition in the table above. 
+```{r}
+# Make new columns for the normalized counts in the BCs object:
+oldnames16 <- colnames(BCs16_map)
+newnamesfrac16 = c('D02n', 'D04n', 
+                   'D12n', 'E01n', 'E02n', 'E03n', 'E04n', 'E05n', 'E06n')
+
+# Add the new columns to the BCs object based on the number of original columns for sampling conditions:
+numcol_16 <- ncol(BCs16_map)
+D02index = which( colnames(BCs16_map)=="D02" )
+
+# For each dilution, re-scale the number of reads by relative sequencing depth of the sample using the scaling values in the norm_vals object:
+for (i in 1:9){
+  BCs16_map[,numcol_16+i] <- BCs16_map[,D02index+i-1]*as.numeric(norm_vals_16$scaling[i])
+}
+
+# Add the new column names to the BCs object:
+colnames(BCs16_map) <- c(oldnames16,newnamesfrac16)
+```
+
+<font color="green">**The following table displays a preview of the normalized count values by unique barcode:**</font>
+```{r echo=FALSE}
+BCs_norm_16 <- BCs16_map[,c(1,18:26)]
+
+# Display dataframe with kable formatting
+BCs_norm_head_16 <- head(BCs_norm_16)
+
+knitr::kable(BCs_norm_head_16,
+  col.names = c('BC', 'D02n', 'D04n',
+                'D12n', 'E01n', 'E02n', 'E03n', 'E04n', 'E05n', 'E06n'),
+  align = "lccccccccccc",
+  format.args = list(big.mark = ","),
+  digits = 0)
+```
+
+## Log2-Fold Change
+
+**Library 15:** Determine the log2-fold changes for each barcode relative to the M9-Supplementation condition (Lib15=D03 | Lib16=D04).
+```{r}
+pseudocount = 1
+
+#Library 15
+BCs15_map <- BCs15_map %>%
+  mutate(D03D01fc=log2(D03n+pseudocount)-log2(D01n+pseudocount),
+         D05D03fc=log2(D05n+pseudocount)-log2(D03n+pseudocount),
+         D06D03fc=log2(D06n+pseudocount)-log2(D03n+pseudocount),
+         D07D03fc=log2(D07n+pseudocount)-log2(D03n+pseudocount),
+         D08D03fc=log2(D08n+pseudocount)-log2(D03n+pseudocount),
+         D09D03fc=log2(D09n+pseudocount)-log2(D03n+pseudocount),
+         D10D03fc=log2(D10n+pseudocount)-log2(D03n+pseudocount),
+         D11D03fc=log2(D11n+pseudocount)-log2(D03n+pseudocount))
+```
+
+**Library 16:** 
+```{r}
+#Library 16
+BCs16_map <- BCs16_map %>%
+  mutate(D04D02fc=log2(D04n+pseudocount)-log2(D02n+pseudocount),
+         D12D04fc=log2(D12n+pseudocount)-log2(D04n+pseudocount),
+         E01D04fc=log2(E01n+pseudocount)-log2(D04n+pseudocount),
+         E02D04fc=log2(E02n+pseudocount)-log2(D04n+pseudocount),
+         E03D04fc=log2(E03n+pseudocount)-log2(D04n+pseudocount),
+         E04D04fc=log2(E04n+pseudocount)-log2(D04n+pseudocount),
+         E05D04fc=log2(E05n+pseudocount)-log2(D04n+pseudocount),
+         E06D04fc=log2(E06n+pseudocount)-log2(D04n+pseudocount))
+```
+
+**Lib15 Log2-FC**
+<font color="green">**The following table displays a preview of the log2-fold change values between sampling treatments:**</font>
+```{r echo=FALSE}
+BCs_norm_log_15 <- BCs15_map[,c(1,27:34)]
+
+# Display dataframe with kable formatting
+BCs_norm_log_head_15 <- head(BCs_norm_log_15)
+
+knitr::kable(BCs_norm_log_head_15,
+  col.names = c('BC', 'D03-D01fc', 
+                'D05-D03fc', 'D06-D03fc', 'D07-D03fc', 'D08-D03fc', 'D09-D03fc', 'D10-D03fc', 'D11-D03fc'),
+  align = "lcccccccccc",
+  format.args = list(big.mark = ","),
+  digits = 0)
+```
+
+**Lib16 Log2-FC**
+<font color="green">**The following table displays a preview of the log2-fold change values between sampling treatments:**</font>
+```{r echo=FALSE}
+BCs_norm_log_16 <- BCs16_map[,c(1,27:34)]
+
+# Display dataframe with kable formatting
+BCs_norm_log_head_16 <- head(BCs_norm_log_16)
+
+knitr::kable(BCs_norm_log_head_16,
+  col.names = c('BC', 'D04-D02fc', 
+                'D12-D04fc', 'E01-D04fc', 'E02-D04fc', 'E03-D04fc', 'E04-D04fc', 'E05-D04fc', 'E06-D04fc'),
+  align = "lcccccccccc",
+  format.args = list(big.mark = ","),
+  digits = 0)
+```
+
+## Min BC Pruning
+
+First, update the `mutIDinfo` object to group BCs by mutID while also adding a new column called "numprunedBCs" that counts the number of unique BCs associated with each unique mutID that passed the filtering threshold in the `BCs_map` object.
+```{r}
+# Lib15
+mutIDinfo15 <- BCs15_map %>%
+  group_by(mutID) %>%
+  summarise(numprunedBCs = n()) %>%
+  right_join(mutIDinfo15, by="mutID")
+
+# Lib16
+mutIDinfo16 <- BCs16_map %>%
+  group_by(mutID) %>%
+  summarise(numprunedBCs = n()) %>%
+  right_join(mutIDinfo16, by="mutID")
+```
+
+### Pre-Filtered mutIDs
+
+**Total:** Count the number of unique mutIDs prior to filtering by minimum numprunedBCs (>0 BC):
+```{r class.output="goodCode"}
+# Count the number of unique mutants prior to filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$mutID)), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$mutID)), big.mark = ",")
+```
+
+**Perfects:** Count the number of unique perfect variants (mutations == 0):
+```{r class.output="goodCode"}
+# Count the number of unique variants remaining after filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$mutID[mutIDinfo15$mutations == 0])), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$mutID[mutIDinfo16$mutations == 0])), big.mark = ",")
+```
+
+**Mutants:** Count the number of unique mutant variants (mutations != 0):
+```{r class.output="goodCode"}
+# Count the number of unique variants remaining after filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$mutID[mutIDinfo15$mutations != 0])), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$mutID[mutIDinfo16$mutations != 0])), big.mark = ",")
+```
+
+### Filtered mutIDs (numprunedBCs)
+
+Replace all NAs with 0 in the "numprunedBCs" column
+```{r}
+#replace NAs with 0
+
+# Lib15
+mutIDinfo15$numprunedBCs[is.na(mutIDinfo15$numprunedBCs)] <- 0
+
+# Lib16
+mutIDinfo16$numprunedBCs[is.na(mutIDinfo16$numprunedBCs)] <- 0
+```
+
+Filter the `mutIDinfo` objects by minimum number of numprunedBCs (>0 BC):
+```{r}
+#variants must have at least 1 BC after pruning:
+
+# Lib15
+mutIDinfo15 <- mutIDinfo15 %>%
+  filter(numprunedBCs>0)
+
+# Lib16
+mutIDinfo16 <- mutIDinfo16 %>%
+  filter(numprunedBCs>0)
+```
+
+**Total:** Count the number of unique variants remaining after filtering:
+```{r class.output="goodCode"}
+# Count the number of unique variants remaining after filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$mutID)), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$mutID)), big.mark = ",")
+```
+
+**Perfects:** Count the number of unique perfect variants (mutations == 0) remaining after filtering:
+```{r class.output="goodCode"}
+# Count the number of unique variants remaining after filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$mutID[mutIDinfo15$mutations == 0])), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$mutID[mutIDinfo16$mutations == 0])), big.mark = ",")
+```
+
+**Mutants:** Count the number of unique homologs that mutant variants (mutations != 0) are associated with after filtering:
+```{r class.output="goodCode"}
+# Count the number of unique variants remaining after filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$IDalign[mutIDinfo15$mutations != 0])), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$IDalign[mutIDinfo16$mutations != 0])), big.mark = ",")
+```
+
+**Mutants:** Count the number of unique mutant variants (mutations != 0) remaining after filtering:
+```{r class.output="goodCode"}
+# Count the number of unique variants remaining after filtering:
+
+# Lib15
+format(length(unique(mutIDinfo15$mutID[mutIDinfo15$mutations != 0])), big.mark = ",")
+
+# Lib16
+format(length(unique(mutIDinfo16$mutID[mutIDinfo16$mutations != 0])), big.mark = ",")
+```
+
+**Mutants (1-5AA):** Count the number of unique mutant variants (mutations != 0) remaining after filtering:
+```{r class.output="goodCode"}
+# Lib15
+unique_mutIDinfo15_5AA_count <- mutIDinfo15 %>%
+  filter(mutations > 0 & mutations < 6) %>%
+  distinct(mutID) %>%
+  nrow()
+
+format(unique_mutIDinfo15_5AA_count, big.mark = ",")
+
+# Lib16
+unique_mutIDinfo16_5AA_count <- mutIDinfo16 %>%
+  filter(mutations > 0 & mutations < 6) %>%
+  distinct(mutID) %>%
+  nrow()
+
+format(unique_mutIDinfo16_5AA_count, big.mark = ",")
+```
+
+**Mutants (>5AA):** Count the number of unique mutant variants (mutations != 0) remaining after filtering:
+```{r class.output="goodCode"}
+# Lib15
+unique_mutIDinfo15_6AA_count <- mutIDinfo15 %>%
+  filter(mutations > 5) %>%
+  distinct(mutID) %>%
+  nrow()
+
+format(unique_mutIDinfo15_6AA_count, big.mark = ",")
+
+# Lib16
+unique_mutIDinfo16_6AA_count <- mutIDinfo16 %>%
+  filter(mutations > 5) %>%
+  distinct(mutID) %>%
+  nrow()
+
+format(unique_mutIDinfo16_6AA_count, big.mark = ",")
+```
+
+**Shared and Unique Mutant mutIDs between Codon Versions at Complementation:**
+```{r class.output="goodCode"}
+# Merge by shared "mutID" (1BC)
+mutIDinfo15.16.shared <- merge(mutIDinfo15, mutIDinfo16, by = "mutID", all = FALSE)
+
+# Count the number of unique BCs shared between libraries
+mutIDinfo15.16.shared.count <- length(unique(mutIDinfo15.16.shared$mutID))
+format(mutIDinfo15.16.shared.count, big.mark = ",")
+
+# Create a new dataset retaining unique values from both datasets (1BC)
+mutIDinfo15.16.unique <- bind_rows(
+  anti_join(mutIDinfo15, mutIDinfo16, by = "mutID"),
+  anti_join(mutIDinfo16, mutIDinfo15, by = "mutID"))
+
+# Count the number of unique BCs unique to one library or the other
+mutIDinfo15.16.unique.count <- length(unique(mutIDinfo15.16.unique$mutID))
+format(mutIDinfo15.16.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+mutIDinfo15.16.all.count <- sum(mutIDinfo15.16.shared.count + mutIDinfo15.16.unique.count)
+format(mutIDinfo15.16.all.count, big.mark = ",")
+```
+
+Count the number of shared and unique mutant mutIDs within 1-5 AA distance:
+```{r class.output="goodCode"}
+# Filter the shared dataset to include only rows where mutations > 0 and < 6
+filtered_shared_data <- mutIDinfo15.16.shared %>%
+  filter(mutations.x > 0 & mutations.x < 6)
+
+# Count the number of unique mutIDs in the filtered shared dataset
+mutIDinfo15.16.5AA.shared.count <- length(unique(filtered_shared_data$mutID))
+format(mutIDinfo15.16.5AA.shared.count, big.mark = ",")
+
+# Filter the dataset to include only rows where mutations > 0 and < 6
+filtered_unique_data <- mutIDinfo15.16.unique %>%
+  filter(mutations > 0 & mutations < 6)
+
+# Count the number of unique mutIDs in the filtered dataset
+mutIDinfo15.16.5AA.unique.count <- length(unique(filtered_unique_data$mutID))
+format(mutIDinfo15.16.5AA.unique.count, big.mark = ",")
+
+# Count number of shared and unique BCs
+mutIDinfo15.16.5AA.all.count <- sum(mutIDinfo15.16.5AA.shared.count + mutIDinfo15.16.5AA.unique.count)
+format(mutIDinfo15.16.5AA.all.count, big.mark = ",")
+```
+
+**Average Mutants for each Homolog:** Calculate the average number of unique mutID associated with each unique IDalign
+```{r class.output="goodCode"}
+# Lib15 - Calculate the average number of unique mutIDs per IDalign
+average_mutIDs_per_IDalign15 <- mutIDinfo15 %>%
+  group_by(IDalign) %>%
+  summarise(unique_mutIDs = n_distinct(mutID)) %>%
+  summarise(avg_unique_mutIDs = mean(unique_mutIDs))
+
+# Print the result
+print(paste("Lib15: Average number of unique mutIDs per IDalign:", round(average_mutIDs_per_IDalign15$avg_unique_mutIDs, 2)))
+
+# Lib16 - Calculate the average number of unique mutIDs per IDalign
+average_mutIDs_per_IDalign16 <- mutIDinfo16 %>%
+  group_by(IDalign) %>%
+  summarise(unique_mutIDs = n_distinct(mutID)) %>%
+  summarise(avg_unique_mutIDs = mean(unique_mutIDs))
+
+# Print the result
+print(paste("Lib16: Average number of unique mutIDs per IDalign:", round(average_mutIDs_per_IDalign16$avg_unique_mutIDs, 2)))
+```
+
+**Median Mutants for each Homolog:** Calculate the median number of unique mutID associated with each unique IDalign
+```{r class.output="goodCode"}
+# Lib15 - Calculate the number of unique mutIDs per IDalign
+mutIDs_per_IDalign15 <- mutIDinfo15 %>%
+  group_by(IDalign) %>%
+  summarise(unique_mutIDs = n_distinct(mutID))
+
+# Calculate the median number of unique mutIDs per IDalign
+median_mutIDs_per_IDalign15 <- median(mutIDs_per_IDalign15$unique_mutIDs)
+
+# Print the result
+print(paste("Lib15: Median number of unique mutIDs per IDalign:", median_mutIDs_per_IDalign15))
+
+# Lib16 - Calculate the number of unique mutIDs per IDalign
+mutIDs_per_IDalign16 <- mutIDinfo16 %>%
+  group_by(IDalign) %>%
+  summarise(unique_mutIDs = n_distinct(mutID))
+
+# Calculate the median number of unique mutIDs per IDalign
+median_mutIDs_per_IDalign16 <- median(mutIDs_per_IDalign16$unique_mutIDs)
+
+# Print the result
+print(paste("Lib16: Median number of unique mutIDs per IDalign:", median_mutIDs_per_IDalign16))
+```
+
+#### Merge by mutID
+
+**All Shared:** Merge based on shared mutID between the two dataset. Count all unique IDalign:
+```{r class.output="goodCode"}
+# Merge by shared "mutID"
+mutIDinfo15.16.shared <- merge(mutIDinfo15, mutIDinfo16, by = "mutID", all = FALSE)
+
+# Count the number of mutID's shared between both libraries after filtering to 5 mutations
+mutIDinfo15.16.shared.filtered.count <- length(unique(mutIDinfo15.16.shared$IDalign.x))
+format(mutIDinfo15.16.shared.filtered.count, big.mark = ",")
+```
+
+**All Unique:** Merge based on unique mutID between the two dataset. Count all unique IDalign:
+```{r class.output="goodCode"}
+# Create a new dataset retaining unique mutIDs from both datasets
+mutIDinfo15.16.unique <- bind_rows(
+  anti_join(mutIDinfo15, mutIDinfo16, by = "mutID"),
+  anti_join(mutIDinfo16, mutIDinfo15, by = "mutID"))
+
+# Count the number of mutID's shared between both libraries after filtering to 5 mutations
+mutIDinfo15.16.unique.count <- length(unique(mutIDinfo15.16.unique$IDalign))
+format(mutIDinfo15.16.unique.count, big.mark = ",")
+```
+
+**Perfects Shared:** Subset for perfects shared between both libraries into a single dataframe:
+```{r class.output="goodCode"}
+# Retain only the rows with a specific value in the "specific_column" column
+mutIDinfo15.16.shared.filtered.perfects <- mutIDinfo15.16.shared %>%
+  filter(mutations.x == 0)
+
+# Count the number of perfects (mutations == 0) shared between both libraries
+mutIDinfo15.16.shared.filtered.perfects.count <- length(unique(mutIDinfo15.16.shared.filtered.perfects$IDalign.x))
+
+format(mutIDinfo15.16.shared.filtered.perfects.count, big.mark = ",")
+```
+
+**Perfects Unique:** Subset the fitness scores for perfects unique to one library or the other into a single dataframe:
+```{r class.output="goodCode"}
+# Retain only the rows with a specific value in the "specific_column" column
+mutIDinfo15.16.unique.filtered.perfects <- mutIDinfo15.16.unique %>%
+  filter(mutations == 0)
+
+# Count the number of perfects (mutations == 0) unique between both libraries
+mutIDinfo15.16.unique.filtered.perfects.count <- length(unique(mutIDinfo15.16.unique.filtered.perfects$IDalign))
+
+format(mutIDinfo15.16.unique.filtered.perfects.count, big.mark = ",")
+```
+
+**Summarize the number of perfects shared or unique between both libraries.**
+```{r class.output="goodCode"}
+mutIDinfo15.16.perfect.all.count <- sum(mutIDinfo15.16.shared.filtered.perfects.count +
+                                                     mutIDinfo15.16.unique.filtered.perfects.count)
+format(mutIDinfo15.16.perfect.all.count, big.mark = ",")
+```
+
+**Mutants Shared:** Subset for mutants shared between both libraries into a single dataframe:
+```{r class.output="goodCode"}
+# Retain only the rows with a specific value in the "specific_column" column
+mutIDinfo15.16.shared.filtered.mutants <- mutIDinfo15.16.shared %>%
+  filter(mutations.x != 0)
+
+# Count the number of mutants (mutations != 0) shared between both libraries
+mutIDinfo15.16.shared.filtered.mutants.count <- length(unique(mutIDinfo15.16.shared.filtered.mutants$IDalign.x))
+
+format(mutIDinfo15.16.shared.filtered.mutants.count, big.mark = ",")
+```
+
+**Mutants Unique:** Subset the fitness scores for mutants unique to one library or the other into a single dataframe:
+```{r class.output="goodCode"}
+# Retain only the rows with a specific value in the "specific_column" column
+mutIDinfo15.16.unique.filtered.mutants <- mutIDinfo15.16.unique %>%
+  filter(mutations != 0)
+
+# Count the number of mutants (mutations != 0) unique between both libraries
+mutIDinfo15.16.unique.filtered.mutants.count <- length(unique(mutIDinfo15.16.unique.filtered.mutants$IDalign))
+
+format(mutIDinfo15.16.unique.filtered.mutants.count, big.mark = ",")
+```
+
+**Summarize the number of mutants shared or unique between both libraries.**
+```{r class.output="goodCode"}
+mutIDinfo15.16.mutants.all.count <- sum(mutIDinfo15.16.shared.filtered.mutants.count +
+                                                     mutIDinfo15.16.unique.filtered.mutants.count)
+format(mutIDinfo15.16.mutants.all.count, big.mark = ",")
+```
+
+## Median Fitness
+
+Now, generate a median fitness value for each unique "mutID" based on its' associated BCs. **IMPORTANT: We have to remove "NA" values from each BC associated with each "mutID" when calculating median fitness values. If not, the code will discard the "mutID" if any of its associated BCs have an "NA" value.**
+```{r}
+# For each ID at each TMP treatment, calculate median fitness based on BCs associated with each ID:
+
+# Lib15
+mutIDinfo15 <- BCs15_map %>%
+  group_by(mutID) %>%
+  summarise(fitD03D01=median(D03D01fc,na.rm=T), fitD05D03=median(D05D03fc,na.rm=T), 
+            fitD06D03=median(D06D03fc,na.rm=T), fitD07D03=median(D07D03fc,na.rm=T), 
+            fitD08D03=median(D08D03fc,na.rm=T), fitD09D03=median(D09D03fc,na.rm=T), 
+            fitD10D03=median(D10D03fc,na.rm=T), fitD11D03=median(D11D03fc,na.rm=T)) %>%
+  right_join(mutIDinfo15, by="mutID")
+
+# Lib16
+mutIDinfo16 <- BCs16_map %>%
+  group_by(mutID) %>%
+  summarise(fitD04D02=median(D04D02fc,na.rm=T), fitD12D04=median(D12D04fc,na.rm=T),
+            fitE01D04=median(E01D04fc,na.rm=T), fitE02D04=median(E02D04fc,na.rm=T), 
+            fitE03D04=median(E03D04fc,na.rm=T), fitE04D04=median(E04D04fc,na.rm=T), 
+            fitE05D04=median(E05D04fc,na.rm=T), fitE06D04=median(E06D04fc,na.rm=T)) %>%
+  right_join(mutIDinfo16, by="mutID")
+```
+
+## Merged Libraries
+
+Subset library `mutIDinfo` objects to retain only the fitness scores for all TMP treatments at Time Point 1.  Then, merge libraries based on shared "mutID".
+
+### Subset Libraries
+
+Create a new dataframe that subsets all BCs and their fitness scores for all TMP treatments at Time Point 1:
+```{r}
+# Select descriptive data columns and fitness scores at time point 1 from mutIDinfo
+
+# Lib15
+BCmutfitness_15 <- mutIDinfo15[, c(1,3:17)]
+
+# Lib16
+BCmutfitness_16 <- mutIDinfo16[, c(1,3:17)]
+```
+
+#### IDalign w/ 5 a.a. Distance
+
+**Unique Perfects IDalign up to 5 a.a. Distance:** Calculate the number of unique IDalign perfects when considering up to 5 a.a. distance mutants:
+```{r class.output="goodCode"}
+# Lib15
+# Count unique IDalign for each mutation level from 0 to 5
+Lib15.IDalign.unique_counts <- BCmutfitness_15 %>%
+  filter(mutations %in% 0:5) %>%
+  summarise(Lib15.IDalign.unique_counts = n_distinct(IDalign))
+  
+
+# Display the results
+print(Lib15.IDalign.unique_counts)
+
+# Lib16
+# Count unique IDalign for each mutation level from 0 to 5
+Lib16.IDalign.unique_counts <- BCmutfitness_16 %>%
+  filter(mutations %in% 0:5) %>%
+  summarise(Lib16.IDalign.unique_counts = n_distinct(IDalign))
+
+# Display the results
+print(Lib16.IDalign.unique_counts)
+```
+
+**All Shared w/ 5 a.a. Distance:** Merge the fitness scores derived from each library into a single dataframe based on shared mutID between the two dataset. Summarize the number of unique IDalign with up to 5 a.a. distance mutants:
+```{r class.output="goodCode"}
+# Merge by shared "mutID"
+BCmut_15.16.mutID.fitness.shared <- merge(BCmutfitness_15, BCmutfitness_16, by = "mutID", all = FALSE)
+
+# Filter up to 5 a.a. mutants
+BCmut_15.16.mutID.fitness.shared.filtered.5AA <- BCmut_15.16.mutID.fitness.shared[BCmut_15.16.mutID.fitness.shared$mutations.x < 6 & BCmut_15.16.mutID.fitness.shared$mutations.y < 6, ]
+
+# Count the number of mutID's shared between both libraries after filtering to 5 mutations
+BCmut_15.16.mutID.fitness.shared.filtered.5AA.count <- length(unique(BCmut_15.16.mutID.fitness.shared.filtered.5AA$IDalign.x))
+format(BCmut_15.16.mutID.fitness.shared.filtered.5AA.count, big.mark = ",")
+```
+
+**All Unique w/ 5 a.a. Distance:** Subset the fitness scores for all unique mutIDs derived from one library or the other into a single dataframe. Summarize the number of unique IDalign with up to 5 a.a. distance mutants:
+```{r class.output="goodCode"}
+# Create a new dataset retaining unique mutIDs from both datasets
+BCmut_15.16.mutID.fitness.unique <- bind_rows(
+  anti_join(BCmutfitness_15, BCmutfitness_16, by = "mutID"),
+  anti_join(BCmutfitness_16, BCmutfitness_15, by = "mutID"))
+
+BCmut_15.16.mutID.fitness.unique.filtered.5AA <- BCmut_15.16.mutID.fitness.unique[BCmut_15.16.mutID.fitness.unique$mutations < 6,]
+
+# Count the number of mutID's shared between both libraries after filtering to 5 mutations
+BCmut_15.16.mutID.fitness.unique.filtered.5AA.count <- length(unique(BCmut_15.16.mutID.fitness.unique.filtered.5AA$IDalign))
+format(BCmut_15.16.mutID.fitness.unique.filtered.5AA.count, big.mark = ",")
+```
+
+**Summarize the number shared or unique between both libraries w/ 5 a.a. distance.**
+```{r class.output="goodCode"}
+BCmut_15.16.mutID.fitness.filtered.5AA.all.count <- sum(BCmut_15.16.mutID.fitness.shared.filtered.5AA.count +
+                                                     BCmut_15.16.mutID.fitness.unique.filtered.5AA.count)
+format(BCmut_15.16.mutID.fitness.filtered.5AA.all.count, big.mark = ",")
+```
+
+## Wildtype E coli
+
+The mutID for wildtype E. coli is: NP_414590
+
+Start by pulling out the wildtype E. coli mutID from the full dataset:
+```{r}
+# Lib15
+BCmut15_NP_414590 <- BCs15_map %>%
+  filter(mutID=="NP_414590") %>%
+  select(-cigar)
+
+# Lib16
+BCmut16_NP_414590 <- BCs16_map %>%
+  filter(mutID=="NP_414590") %>%
+  select(-cigar)
+```
+
+```{r}
+# Lib15
+BCmut15_NP_414590_logfc <- BCmut15_NP_414590 %>%
+  select(BC, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc)
+
+print(BCmut15_NP_414590_logfc)
+```
+
+```{r}
+# Lib16
+BCmut16_NP_414590_logfc <- BCmut16_NP_414590 %>%
+  select(BC, D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc)
+
+print(BCmut16_NP_414590_logfc)
+```
+
+Subset the logFC data columns for Time Point 1 and define the treatment levels for each comparison:
+```{r}
+# Lib15
+BCmut15_NP_414590_logfc <- BCmut15_NP_414590 %>%
+  select(BC, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc) %>%
+  pivot_longer(!BC, names_to = "fc", values_to = "val") %>%
+  mutate(Lib = "Lib15",
+         TMP = case_when(
+           fc == "D05D03fc" ~ "0-TMP",
+           fc == "D06D03fc" ~ "0.058-TMP",
+           fc == "D07D03fc" ~ "0.5-TMP",
+           fc == "D08D03fc" ~ "1.0-TMP",
+           fc == "D09D03fc" ~ "10-TMP",
+           fc == "D10D03fc" ~ "50-TMP",
+           fc == "D11D03fc" ~ "200-TMP",
+           TRUE ~ NA_character_))
+
+# Lib16
+BCmut16_NP_414590_logfc <- BCmut16_NP_414590 %>%
+  select(BC, D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc) %>%
+  pivot_longer(!BC, names_to = "fc", values_to = "val") %>%
+  mutate(Lib = "Lib16",
+         TMP = case_when(
+           fc == "D12D04fc" ~ "0-TMP",
+           fc == "E01D04fc" ~ "0.058-TMP",
+           fc == "E02D04fc" ~ "0.5-TMP",
+           fc == "E03D04fc" ~ "1.0-TMP",
+           fc == "E04D04fc" ~ "10-TMP",
+           fc == "E05D04fc" ~ "50-TMP",
+           fc == "E06D04fc" ~ "200-TMP",
+           TRUE ~ NA_character_))
+```
+
+Remove "NA" values
+```{r}
+# Lib15
+BCmut15_NP_414590_logfc <- na.omit(BCmut15_NP_414590_logfc)
+
+# Lib16
+BCmut16_NP_414590_logfc <- na.omit(BCmut16_NP_414590_logfc)
+```
+
+Combine the Library dataframes and remove BC column
+```{r}
+# Combine the data frames
+BCmut_15_16_NP_414590_logfc <- rbind(BCmut15_NP_414590_logfc %>% select(-BC),
+                                     BCmut16_NP_414590_logfc %>% select(-BC))
+```
+
+Generate the boxplot with both libraries
+```{r}
+# Define the plotting order
+BCmut_15_16_NP_414590_logfc_order <- c("0-TMP", "0.058-TMP", "0.5-TMP", "1.0-TMP", "10-TMP", "50-TMP", "200-TMP")
+
+# Generate the boxplot
+BCmut_15_16_NP_414590_logfc_plot <- ggplot(BCmut_15_16_NP_414590_logfc, aes(x = TMP, y = val, fill = Lib)) +
+  geom_boxplot(position = "dodge") +
+  scale_x_discrete(limits = BCmut_15_16_NP_414590_logfc_order, drop = FALSE) +
+  xlab("") +
+  ylab(expression(atop("Wild Type "~italic("E. coli")~" Fitness", "Log2-Fold Change"))) +
+  #ggtitle("Wild-Type (WT) E. coli Homolog Fitness") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5), 
+        #plot.title = element_text(size = 16, hjust = 0, face = "bold"), 
+        axis.text.x = element_text(size = 12), 
+        axis.text.y = element_text(size = 12), 
+        panel.background = element_blank(),
+        axis.title.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 12), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = c(1, 1),
+        legend.justification = c(1, 1),
+        legend.box.background = element_rect(colour = "black")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("Lib15" = "#0072B2", "Lib16" = "#E69F00")) +
+  scale_y_continuous(expand = c(0, 0), limits = c(-6, 3))
+
+BCmut_15_16_NP_414590_logfc_plot
+```
+
+```{r echo=FALSE}
+ggsave(file="Count/PLOTS/Lib15.16.WT.e.coli.fitness.boxplot.png", plot=BCmut_15_16_NP_414590_logfc_plot,
+       dpi=600, width = 6, height = 5, units = "in")
+```
+
+## Controls
+The following section summarizes the log2-fold change in **CONTROL** barcodes between A05 vs. A06 sampling conditions.
+
+### Control Barcodes
+Load in the controls and their associated barcodes:
+```{r}
+#load controls
+controls <- read.csv("Count/control_BCs.csv", head=FALSE)
+colnames(controls) <- c("ctrlname","colnum","BClong","BC","BClen")
+```
+
+The following code corrects an error in the control BCs before mapping to the Count files:
+```{r}
+controls <- controls %>%
+  mutate(BCstub=str_sub(BClong,1,-4)) %>%
+  dplyr::rename(BCold=BC) %>%
+  dplyr::rename(BC=BCstub)
+```
+
+Summarize the number of control barcodes from the full pruned `BCs` dataset:
+```{r, class.output="goodCode"}
+# Library 15
+
+# Map the Control BCs to the BCs.prune dataset for all samples:
+BCcontrols_15 <- inner_join(BCs15.prune,controls,by="BC")
+
+# Re-arrange the resulting dataframe to place the descriptive columns at the beginning:
+BCcontrols_15 <- BCcontrols_15[, c(1, 11, 15, 2:10)]
+
+# Count the number of unique control barcodes mapped to the full pruned BCs dataset:
+BCcontrols_15.count <- inner_join(BCs15.prune,controls,by="BC") %>%
+  nrow()
+
+BCcontrols_15.count
+```
+
+```{r class.output="goodCode"}
+# Library 16
+
+# Map the Control BCs to the BCs.prune dataset for all samples:
+BCcontrols_16 <- inner_join(BCs16.prune,controls,by="BC")
+
+# Re-arrange the resulting dataframe to place the descriptive columns at the beginning:
+BCcontrols_16 <- BCcontrols_16[, c(1, 11, 15, 2:10)]
+
+# Count the number of unique control barcodes mapped to the full pruned BCs dataset:
+BCcontrols_16.count <- inner_join(BCs16.prune,controls,by="BC") %>%
+  nrow()
+
+BCcontrols_16.count
+```
+
+### Control BC Scaling
+
+**Lib15:** Scale the control BC counts for each sampling condition (D05n, D06n, etc) based on the scaling values provided:
+```{r}
+# Lib15
+
+# Make new columns for the normalized counts in the BCs object:
+control.oldnames15 <- colnames(BCcontrols_15)
+control.newnamesfrac15 = c('D01n', 'D03n', 
+                   'D05n', 'D06n', 'D07n', 'D08n', 'D09n', 'D10n', 'D11n')
+
+# Add the new columns to the BCs object based on the number of original columns for sampling conditions:
+control.numcol_15 <- ncol(BCcontrols_15)
+control.D01index = which(colnames(BCcontrols_15)=="D01")
+
+# For each sample, re-scale the number of reads by relative sequencing depth of the sample using the scaling values in the norm_vals object:
+for (i in 1:9){
+  BCcontrols_15[,control.numcol_15+i] <- BCcontrols_15[,control.D01index+i-1]*as.numeric(norm_vals_15$scaling[i])
+}
+
+# Add the new column names to the BCs object:
+colnames(BCcontrols_15) <- c(control.oldnames15,control.newnamesfrac15)
+```
+
+**Lib16:** Scale the control BC counts for each sampling condition (D012n, E01n, etc) based on the scaling values provided:
+```{r}
+# Lib16
+
+# Make new columns for the normalized counts in the BCs object:
+control.oldnames16 <- colnames(BCcontrols_16)
+control.newnamesfrac16 = c('D02n', 'D04n', 
+                   'D12n', 'E01n', 'E02n', 'E03n', 'E04n', 'E05n', 'E06n')
+
+# Add the new columns to the BCs object based on the number of original columns for sampling conditions:
+control.numcol_16 <- ncol(BCcontrols_16)
+control.D02index = which(colnames(BCcontrols_16)=="D02")
+
+# For each sample, re-scale the number of reads by relative sequencing depth of the sample using the scaling values in the norm_vals object:
+for (i in 1:9){
+  BCcontrols_16[,control.numcol_16+i] <- BCcontrols_16[,control.D02index+i-1]*as.numeric(norm_vals_16$scaling[i])
+}
+
+# Add the new column names to the BCs object:
+colnames(BCcontrols_16) <- c(control.oldnames16,control.newnamesfrac16)
+```
+
+### Control LogFC
+
+**Standard Approach** Determine the log2-fold changes for each control BC relative to the M9-Supplementation condition:
+```{r}
+# Lib 15
+
+BCcontrols_15 <- BCcontrols_15 %>%
+  mutate(D03D01fc=log2(D03n+pseudocount)-log2(D01n+pseudocount),
+         D05D03fc=log2(D05n+pseudocount)-log2(D03n+pseudocount),
+         D06D03fc=log2(D06n+pseudocount)-log2(D03n+pseudocount),
+         D07D03fc=log2(D07n+pseudocount)-log2(D03n+pseudocount),
+         D08D03fc=log2(D08n+pseudocount)-log2(D03n+pseudocount),
+         D09D03fc=log2(D09n+pseudocount)-log2(D03n+pseudocount),
+         D10D03fc=log2(D10n+pseudocount)-log2(D03n+pseudocount),
+         D11D03fc=log2(D11n+pseudocount)-log2(D03n+pseudocount))
+
+# Lib 16
+
+BCcontrols_16 <- BCcontrols_16 %>%
+  mutate(D04D02fc=log2(D04n+pseudocount)-log2(D02n+pseudocount),
+         D12D04fc=log2(D12n+pseudocount)-log2(D04n+pseudocount),
+         E01D04fc=log2(E01n+pseudocount)-log2(D04n+pseudocount),
+         E02D04fc=log2(E02n+pseudocount)-log2(D04n+pseudocount),
+         E03D04fc=log2(E03n+pseudocount)-log2(D04n+pseudocount),
+         E04D04fc=log2(E04n+pseudocount)-log2(D04n+pseudocount),
+         E05D04fc=log2(E05n+pseudocount)-log2(D04n+pseudocount),
+         E06D04fc=log2(E06n+pseudocount)-log2(D04n+pseudocount))
+```
+
+```{r}
+### Lib15
+# Create summary table of WT barcode fitness values:
+BCcontrols_15_WT <- BCcontrols_15 %>%
+  filter(ctrlname == "WT") %>%
+  select(BC, ctrlname, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc)
+
+print(BCcontrols_15_WT)
+```
+
+```{r}
+### Lib16
+# Create summary table of WT barcode fitness values:
+BCcontrols_16_WT <- BCcontrols_16 %>%
+  filter(ctrlname == "WT") %>%
+  select(BC, ctrlname, D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc)
+
+print(BCcontrols_16_WT)
+```
+
+
+### WT Control Combined
+```{r}
+# Merge Lib15 and Lib16 Controls by BC
+BCcontrol_15_16_WT <- inner_join(BCcontrols_15, BCcontrols_16, by = "BC")
+
+# Remove Neg. Ctrls (D27N, mCherry)
+BCcontrol_15_16_WT <- BCcontrol_15_16_WT %>%
+  filter(!(ctrlname.x %in% c("D27N", "mCherry")))
+
+# Keep only select columns
+BCcontrol_15_16_WT <- BCcontrol_15_16_WT %>%
+  select(ctrlname.x, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc,
+         D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc)
+
+# Save a copy for Supplemental
+write.csv(BCcontrol_15_16_WT, file = "Count/count_files_formatted/BCcontrols_15_16_WT.csv", row.names = FALSE)
+```
+
+### Control Median Fitness
+
+```{r}
+#Lib15
+BCcontrols_15_median <- BCcontrols_15 %>%
+  group_by(ctrlname) %>%
+  summarise(fitD05D03 = median(D05D03fc, na.rm = TRUE),
+            fitD06D03 = median(D06D03fc, na.rm = TRUE),
+            fitD07D03 = median(D07D03fc, na.rm = TRUE),
+            fitD08D03 = median(D08D03fc, na.rm = TRUE),
+            fitD09D03 = median(D09D03fc, na.rm = TRUE),
+            fitD10D03 = median(D10D03fc, na.rm = TRUE),
+            fitD11D03 = median(D11D03fc, na.rm = TRUE))
+
+#Lib16
+BCcontrols_16_median <- BCcontrols_16 %>%
+  group_by(ctrlname) %>%
+  summarise(fitD12D04 = median(D12D04fc, na.rm = TRUE),
+            fitE01D04 = median(E01D04fc, na.rm = TRUE),
+            fitE02D04 = median(E02D04fc, na.rm = TRUE),
+            fitE03D04 = median(E03D04fc, na.rm = TRUE),
+            fitE04D04 = median(E04D04fc, na.rm = TRUE),
+            fitE05D04 = median(E05D04fc, na.rm = TRUE),
+            fitE06D04 = median(E06D04fc, na.rm = TRUE))
+
+# Merged shared values from both libraries
+BCcontrols_15_16_shared_median <- inner_join(BCcontrols_15_median, BCcontrols_16_median, by = "ctrlname")
+
+# Keep a copy of only shared WT (Pos Ctrl) median fitness
+BCcontrols_15_16_shared_median_WT <- BCcontrols_15_16_shared_median %>%
+  filter(!(ctrlname %in% c("D27N", "mCherry")))
+
+# Keep a copy of shared D27N and mCherry (Neg Ctrls) median fitness
+BCcontrols_15_16_shared_median_Neg <- BCcontrols_15_16_shared_median %>%
+  filter(!(ctrlname %in% "WT"))
+```
+
+### Plotting Controls
+
+#### WT Fitness Plot
+
+Plot the WT control fitness plot across the TMP gradient using Day 1 variables only
+```{r}
+# Reshape the data from wide to long format
+BCcontrol_15_16_WT_long <- BCcontrol_15_16_WT %>%
+  select(ctrlname.x, ends_with("fc")) %>%
+  pivot_longer(cols = -ctrlname.x, 
+               names_to = "condition", 
+               values_to = "fitness") %>%
+  mutate(
+    Lib = case_when(
+      grepl("D03fc", condition) ~ "Codon1",
+      grepl("D04fc", condition) ~ "Codon2"
+    ),
+    concentration = case_when(
+      condition %in% c("D05D03fc", "D12D04fc") ~ "0",
+      condition %in% c("D06D03fc", "E01D04fc") ~ "0.058",
+      condition %in% c("D07D03fc", "E02D04fc") ~ "0.5",
+      condition %in% c("D08D03fc", "E03D04fc") ~ "1.0",
+      condition %in% c("D09D03fc", "E04D04fc") ~ "10",
+      condition %in% c("D10D03fc", "E05D04fc") ~ "50",
+      condition %in% c("D11D03fc", "E06D04fc") ~ "200"
+    )
+  ) %>%
+  filter(!is.na(Lib))
+
+# Create the plot
+BCcontrol_15_16_WT_plot <- ggplot(BCcontrol_15_16_WT_long, aes(x = concentration, y = fitness, fill = Lib)) +
+  #geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.5) +
+  geom_boxplot(position = position_dodge(width = 0.8), alpha = 0.8) +
+  xlab("Trimethoprim (ug/mL)") +
+  ylab(expression(paste("Median Fitness (LogFC)"))) +
+  scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12),
+    legend.position = "bottom"
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(-15, 1)) +
+  scale_fill_manual(values = c("Codon1" = "#0072B2", "Codon2" = "#E69F00"))
+
+# Display the plot
+print(BCcontrol_15_16_WT_plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Count/PLOTS/Lib15.16.5BCs.WT.E.coli.dose.response.boxplot.png", plot=BCcontrol_15_16_WT_plot,
+       dpi=600, width = 6, height = 4, units = "in")
+```
+
+#### Plot by Control
+
+**Lib15 Controls**
+Plot the control barcodes as the log2-fold change comparison between D05 vs. D03:
+```{r}
+# Plot the Fraction of Total Barcodes Mapped
+ctrl_comp_plot_L15 <- ggplot(data = BCcontrols_15, aes(x = ctrlname, y = D05D03fc, fill = ctrlname)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  xlab("") +
+  ylab("Control Fitness at Complementation \n(Log2-Fold Change)") +
+  ggtitle("Library 15 Control Fitness") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5), 
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"), 
+        axis.text.x = element_text(size = 12), 
+        axis.text.y = element_text(size = 12), 
+        panel.background = element_blank(), 
+        axis.title.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 12), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("D27N" = "#00800080", "mCherry" = "#FF000080", "WT" = "#0000FF80")) +
+  guides(linetype = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-3, 0))
+
+ctrl_comp_plot_L15
+```
+
+**Lib16 Controls**
+Plot the control barcodes as the log2-fold change comparison between D12 vs. D04:
+```{r}
+# Plot the Fraction of Total Barcodes Mapped
+ctrl_comp_plot_L16 <- ggplot(data = BCcontrols_16, aes(x = ctrlname, y = D12D04fc, fill = ctrlname)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  xlab("") +
+  ylab("") +
+  ggtitle("Library 16 Control Fitness") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5), 
+        plot.title = element_text(size = 14, hjust = 0.5, face = "bold"), 
+        axis.text.x = element_text(size = 12), 
+        axis.text.y = element_text(size = 12), 
+        panel.background = element_blank(), 
+        axis.title.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 12), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("D27N" = "#00800080", "mCherry" = "#FF000080", "WT" = "#0000FF80")) +
+  guides(linetype = "none") +
+  scale_y_continuous(expand = c(0, 0), limits = c(-3, 0))
+
+ctrl_comp_plot_L16
+```
+
+```{r echo=FALSE}
+# Library 15
+ggsave(file="Count/PLOTS/Controls_Lib15_D05D03fc.png", plot=ctrl_comp_plot_L15,
+       dpi=600, width = 6, height = 4, units = "in")
+
+# Library 16
+ggsave(file="Count/PLOTS/Controls_Lib16_D12D04fc.png", plot=ctrl_comp_plot_L16,
+       dpi=600, width = 6, height = 4, units = "in")
+```
+
+```{r echo=FALSE}
+patch2 <- (ctrl_comp_plot_L15 | ctrl_comp_plot_L16)
+patch2
+```
+
+```{r echo=FALSE}
+ggsave(file="Count/PLOTS/Lib15.16.ctrls.complementation.time1.png", plot=patch2,
+       dpi=600, width = 10, height = 4, units = "in")
+```
+
+```{r echo=FALSE, results='hide'}
+# Library 15
+write.csv(BCcontrols_15,"Count/INPUT/BC_15_controls.csv", row.names = FALSE)
+
+# Library 16
+write.csv(BCcontrols_16,"Count/INPUT/BC_16_controls.csv", row.names = FALSE)
+```
+
+#### Plot by TMP
+
+Subset the logFC data columns
+```{r}
+# Lib15
+BCcontrols_15_logfc <- BCcontrols_15 %>%
+  select(BC, ctrlname, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc) %>%
+  pivot_longer(cols = -c(BC, ctrlname),
+               names_to = "fc",
+               names_pattern = "^(.+)$",
+               values_to = "val") %>%
+  select(BC, Ctrl = ctrlname, fc, val)
+```
+
+```{r}
+# Lib16
+BCcontrols_16_logfc <- BCcontrols_16 %>%
+  select(BC, ctrlname, D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc) %>%
+  pivot_longer(cols = -c(BC, ctrlname),
+               names_to = "fc",
+               names_pattern = "^(.+)$",
+               values_to = "val") %>%
+  select(BC, Ctrl = ctrlname, fc, val)
+```
+
+Remove "NA" values
+```{r}
+# Lib15
+BCcontrols_15_logfc <- na.omit(BCcontrols_15_logfc)
+
+# Lib16
+BCcontrols_16_logfc <- na.omit(BCcontrols_16_logfc)
+```
+
+Place sample IDs in desired order for plotting
+```{r}
+# Lib15
+Lib15_CTRL_level_order <- c("D05D03fc", "D06D03fc", "D07D03fc", "D08D03fc", "D09D03fc", "D10D03fc", "D11D03fc")
+
+# Lib16
+Lib16_CTRL_level_order <- c("D12D04fc", "E01D04fc", "E02D04fc", "E03D04fc", "E04D04fc", "E05D04fc", "E06D04fc")
+```
+
+**Lib15**
+```{r}
+Lib15_TMP_level_order <- c("D05D03fc", "D06D03fc", "D07D03fc", "D08D03fc", "D09D03fc", "D10D03fc", "D11D03fc")
+
+ctrl_tmp_plot_L15 <- ggplot(BCcontrols_15_logfc, aes(x = factor(fc, levels = Lib15_TMP_level_order), y = val, fill = Ctrl)) +
+  geom_boxplot(color = "black", width = 0.5, alpha = 0.8) +
+  geom_point() +
+  ggtitle("Control Fitness by Trimethoprim Treatment") +
+  ylab("Codon 1 Control Fitness\n(Log2-Fold Change)") +
+  xlab("") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5), 
+        plot.title = element_text(size = 16, hjust = 0.5, face = "bold"), 
+        axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 12), 
+        panel.background = element_blank(), 
+        axis.title.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 14), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none") +
+  guides(linetype = "none") +
+  scale_x_discrete(labels = c("0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")) +
+  scale_fill_manual(values = c("D27N" = "#00800080", "mCherry" = "#FF000080", "WT" = "#0000FF80"))
+
+ctrl_tmp_plot_L15
+```
+
+**Lib16**
+```{r}
+Lib16_TMP_level_order <- c("D12D04fc", "E01D04fc", "E02D04fc", "E03D04fc", "E04D04fc", "E05D04fc", "E06D04fc")
+
+ctrl_tmp_plot_L16 <- ggplot(BCcontrols_16_logfc, aes(x = factor(fc, levels = Lib16_TMP_level_order), y = val, fill = Ctrl)) +
+  geom_boxplot(color = "black", width = 0.5, alpha = 0.8) +
+  geom_point() +
+  #ggtitle("Library 16 Control Fitness") +
+  ylab("Codon 2 Control Fitness\n(Log2-Fold Change)") +
+  xlab("") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 0.5), 
+        axis.ticks = element_line(colour = "black", size = 0.5), 
+        plot.title = element_text(size = 16, hjust = 0.5, face = "bold"), 
+        axis.text.x = element_text(size = 12, angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 12), 
+        panel.background = element_blank(), 
+        axis.title.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 14), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom") +
+  guides(linetype = "none") +
+  scale_x_discrete(labels = c("0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")) +
+  scale_fill_manual(values = c("D27N" = "#00800080", "mCherry" = "#FF000080", "WT" = "#0000FF80"))
+
+ctrl_tmp_plot_L16
+```
+
+```{r echo=FALSE}
+# Library 15
+ggsave(file="Count/PLOTS/Lib15.controls.tmp.gradient.png", plot=ctrl_tmp_plot_L15,
+       dpi=600, width = 6, height = 4, units = "in")
+
+# Library 16
+ggsave(file="Count/PLOTS/Lib16.controls.tmp.gradient.png", plot=ctrl_tmp_plot_L16,
+       dpi=600, width = 6, height = 4, units = "in")
+```
+
+```{r echo=FALSE}
+patch3 <- (ctrl_tmp_plot_L15 / ctrl_tmp_plot_L16)
+patch3
+```
+
+```{r echo=FALSE}
+ggsave(file="Count/PLOTS/Lib15.16.ctrls.trimethoprim.png", plot=patch3,
+       dpi=600, width = 8, height = 10, units = "in")
+```
+
+# Save Count Files
+
+Save the formatted count files to import for downstream analyses
+```{r}
+# BCs15_map (62.6 MB)
+write.csv(BCs15_map, "Count/count_files_formatted/BCs15_map.csv", row.names = FALSE)
+
+# BCs16_map (80.5 MB)
+write.csv(BCs16_map, "Count/count_files_formatted/BCs16_map.csv", row.names = FALSE)
+
+###------------------------------------
+
+# mutIDinfo15 (17 MB)
+
+# Select columns of interest to remove duplicates
+mutIDinfo15.filtered <- mutIDinfo15 %>%
+  select(mutID,fitD03D01,fitD05D03,fitD06D03,fitD07D03,fitD08D03,fitD09D03,fitD10D03,fitD11D03,
+  numprunedBCs,IDalign,numBCs,mutations,seq,pct_ident)
+
+write.csv(mutIDinfo15.filtered, "Count/count_files_formatted/mutIDinfo15.csv", row.names = FALSE)
+
+# mutIDinfo16 (14.7 MB)
+
+# Select columns of interest to remove duplicates
+mutIDinfo16.filtered <- mutIDinfo16 %>%
+  select(mutID,fitD04D02,fitD12D04,fitE01D04,fitE02D04,fitE03D04,fitE04D04,fitE05D04,fitE06D04,
+  numprunedBCs,IDalign,numBCs,mutations,seq,pct_ident)
+
+write.csv(mutIDinfo16.filtered, "Count/count_files_formatted/mutIDinfo16.csv", row.names = FALSE)
+
+###------------------------------------
+
+# BCcontrols_15_16_shared_median_WT (435 Bytes)
+write.csv(BCcontrols_15_16_shared_median_WT, "Count/count_files_formatted/BCcontrols_15_16_shared_median_WT.csv", row.names = FALSE)
+
+# BCcontrols_15_16_shared_median_Neg (697 Bytes)
+write.csv(BCcontrols_15_16_shared_median_Neg, "Count/count_files_formatted/BCcontrols_15_16_shared_median_Neg.csv", row.names = FALSE)
+
+###------------------------------------
+
+# BCcontrols_15_median
+write.csv(BCcontrols_15_median, "Count/count_files_formatted/BCcontrols_15_median.csv", row.names = FALSE)
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
