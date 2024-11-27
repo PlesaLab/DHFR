@@ -1,0 +1,2811 @@
+---
+title: "Gain-of-Function Mutants Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Import Data Files
+
+Import **MUTANTS** files generated from [DHFR.4.Mutants.RMD](https://github.com/PlesaLab/DHFR) relevant for downstream analysis.
+```{r}
+# mut_collapse_15
+mut_collapse_15 <- read.csv("Mutants/mutants_files_formatted/mut_collapse_15.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+Import **BMS** files generated from [DHFR.5.BMS.RMD](https://github.com/PlesaLab/DHFR) relevant for downstream analysis.
+```{r}
+# protein_info_1H1T
+protein_info_1H1T <- read.csv("BMS/bms_files_formatted/protein_info_1H1T.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# BMS_matrix15_perfects_and_1_melt
+BMS_matrix15_perfects_and_1_melt <- read.csv("BMS/bms_files_formatted/BMS_matrix15_perfects_and_1_melt.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# BMS_matrix15_perfects_and_1_num_melt
+BMS_matrix15_perfects_and_1_num_melt <- read.csv("BMS/bms_files_formatted/BMS_matrix15_perfects_and_1_num_melt.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+# GOF Mutants Analysis
+
+<font color="blue">**This section is based on the R file: "R_dropout_GOF.R".**</font> It describes how to determine if certain mutant versions of a designed homolog increase in fitness under trimethoprim selection (i.e., gain of function after mutation).
+
+## Complementation
+
+Start with two histograms showing (1) the distribution of perfects (counts; y-axis) by fitness (x-axis) with fitness < -1 colored blue and fitness > -1 colored gold, and (2) the distribution of mutants (counts; y-axis) by fitness (x-axis) with fitness < -1 colored blue and fitness > -1 colored gold
+
+**Perfects:** Smooth Histogram
+```{r}
+# Subset mutants (mutations != 0)
+L15_perfects_complementation <- mut_collapse_15 %>%
+  filter(mutations == 0)
+
+# Remove NA and infinite values for x-axis scaling
+fitD05D03_perf_clean <- L15_perfects_complementation$fitD05D03[is.finite(L15_perfects_complementation$fitD05D03)]
+
+# Calculate the range of the data
+x_min_perf <- floor(min(fitD05D03_perf_clean, na.rm = TRUE))
+x_max_perf <- ceiling(max(fitD05D03_perf_clean, na.rm = TRUE))
+
+# Plot smooth density curve
+L15_perfects_complementation_density <- ggplot(L15_perfects_complementation, aes(x = fitD05D03)) +
+  geom_density(aes(y = after_stat(density * 100), 
+                   fill = ifelse(fitD05D03 <= -1, "darkblue", "gold")), 
+               alpha = 0.75) +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "black") +
+  scale_fill_identity() +
+  scale_x_continuous(breaks = seq(x_min_perf, x_max_perf, by = 1)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(x = "Median Fitness (LogFC)", y = "Percentage") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 1.0), 
+        axis.ticks = element_line(colour = "black", size = 1.0),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = "none")
+
+# Display plot
+print(L15_perfects_complementation_density)
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="GOF/PLOTS/Lib15_Complementation_Perfects_low_high_fitness_density.png", plot=L15_perfects_complementation_density,
+       width=6, height=5, units="in")
+```
+
+**Percent of Perfects with Strong Depletion (fitness < -2.5)**
+```{r class.output="goodCode"}
+# Calculate the percentages and counts
+results <- L15_perfects_complementation %>%
+  filter(!is.na(fitD05D03)) %>%  # Remove rows where fitD05D03 is NA
+  summarise(
+    total_unique_IDs = n_distinct(ID),
+    IDs_below_neg2_5 = n_distinct(ID[fitD05D03 < -2.5]),
+    percentage_below_neg2_5 = (IDs_below_neg2_5 / total_unique_IDs) * 100,
+    IDs_below_neg1 = n_distinct(ID[fitD05D03 < -1]),
+    IDs_above_or_equal_neg1 = n_distinct(ID[fitD05D03 >= -1]),
+    percentage_below_neg1 = (IDs_below_neg1 / total_unique_IDs) * 100,
+    percentage_above_or_equal_neg1 = (IDs_above_or_equal_neg1 / total_unique_IDs) * 100
+  )
+
+# Print the results
+print(paste0("Percentage of unique IDs with fitD05D03 < -2.5: ", 
+             round(results$percentage_below_neg2_5, 2), "%"))
+print(paste("Total unique IDs:", results$total_unique_IDs))
+print(paste("Unique IDs with fitD05D03 < -2.5:", results$IDs_below_neg2_5))
+
+print("\nAdditional fitness categories:")
+print(paste("Unique IDs with fitD05D03 < -1:", results$IDs_below_neg1))
+print(paste0("Percentage: ", round(results$percentage_below_neg1, 2), "%"))
+
+print(paste("Unique IDs with fitD05D03 >= -1:", results$IDs_above_or_equal_neg1))
+print(paste0("Percentage: ", round(results$percentage_above_or_equal_neg1, 2), "%"))
+```
+
+**Mutants:** Smooth Histogram
+```{r}
+# Subset mutants (mutations != 0)
+L15_mutants_complementation <- mut_collapse_15 %>%
+  filter(mutations > 0 & mutations < 6)
+
+# Remove NA and infinite values for x-axis scaling
+fitD05D03_mut_clean <- L15_mutants_complementation$fitD05D03[is.finite(L15_mutants_complementation$fitD05D03)]
+
+# Calculate the range of the data
+x_min_mut <- floor(min(fitD05D03_mut_clean, na.rm = TRUE))
+x_max_mut <- ceiling(max(fitD05D03_mut_clean, na.rm = TRUE))
+
+# Plot smooth density curve
+L15_mutants_complementation_density <- ggplot(L15_mutants_complementation, aes(x = fitD05D03)) +
+  geom_density(aes(y = after_stat(density * 100), 
+                   fill = ifelse(fitD05D03 <= -1, "darkblue", "gold")), 
+               alpha = 0.75) +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "black") +
+  scale_fill_identity() +
+  scale_x_continuous(breaks = seq(x_min_mut, x_max_mut, by = 1)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(x = "Median Fitness (LogFC)", y = "Percentage") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 1.0), 
+        axis.ticks = element_line(colour = "black", size = 1.0),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = "none")
+
+# Display plot
+print(L15_mutants_complementation_density)
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="GOF/PLOTS/Lib15_Complementation_Mutants_low_high_fitness_density.png", plot=L15_mutants_complementation_density,
+       width=5, height=5, units="in")
+```
+
+**Perfects & Mutants:** Smooth Histogram
+```{r}
+# Subset mutants (mutations != 0)
+L15_perfects_mutants_complementation <- mut_collapse_15 %>%
+  filter(mutations >= 0 & mutations < 6)
+
+# Remove NA and infinite values for x-axis scaling
+fitD05D03_perf_mut_clean <- L15_perfects_mutants_complementation$fitD05D03[is.finite(L15_perfects_mutants_complementation$fitD05D03)]
+
+# Calculate the range of the data
+x_min_perf_mut <- floor(min(fitD05D03_perf_mut_clean, na.rm = TRUE))
+x_max_perf_mut <- ceiling(max(fitD05D03_perf_mut_clean, na.rm = TRUE))
+
+# Plot smooth density curve
+L15_perfects_mutants_complementation_density <- ggplot(L15_perfects_mutants_complementation, aes(x = fitD05D03)) +
+  geom_density(aes(y = after_stat(density * 100), 
+                   fill = ifelse(fitD05D03 <= -1, "darkblue", "gold")), 
+               alpha = 0.75) +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "black") +
+  scale_fill_identity() +
+  scale_x_continuous(breaks = seq(x_min_perf_mut, x_max_perf_mut, by = 1)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(x = "Median Fitness (LogFC)", y = "Percentage") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 1.0), 
+        axis.ticks = element_line(colour = "black", size = 1.0),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = "none")
+
+# Display plot
+print(L15_perfects_mutants_complementation_density)
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="GOF/PLOTS/Lib15_Complementation_Perfects_Mutants_low_high_fitness_density.png", plot=L15_perfects_mutants_complementation_density,
+       width=5, height=5, units="in")
+```
+
+**Mutant Counts*
+```{r class.output="goodCode"}
+# Step 1: Identify IDs that meet the criteria (mutations == 0 and fitD05D03 >= -1)
+valid_IDs <- mut_collapse_15 %>%
+  filter(mutations == 0 & fitD05D03 >= -1) %>%
+  pull(ID)
+
+# Step 2: Filter mutIDs based on the criteria and association with valid IDs
+unique_mutIDinfo15_5AA_count <- mut_collapse_15 %>%
+  filter(ID %in% valid_IDs) %>%  # Keep only rows associated with valid IDs
+  filter(mutations > 0 & mutations < 6) %>%  # Keep mutIDs with 1-5 mutations
+  distinct(mutID) %>%
+  nrow()
+
+# Format and print the result
+formatted_count <- format(unique_mutIDinfo15_5AA_count, big.mark = ",")
+print(paste("Number of unique mutIDs with 1-5 mutations associated with complementing perfects:", formatted_count))
+```
+
+```{r class.output="goodCode"}
+# Step 1: Identify IDs that meet the criteria (mutations == 0 and fitD05D03 < -1)
+LOF_IDs <- mut_collapse_15 %>%
+  filter(mutations == 0 & fitD05D03 < -1) %>%
+  pull(ID)
+
+# Step 2: Filter mutIDs based on the criteria and association with LOF_IDs
+GOF_mutants <- mut_collapse_15 %>%
+  filter(ID %in% LOF_IDs) %>%  # Keep only rows associated with LOF_IDs
+  filter(mutations == 1) %>%  # Keep mutIDs with 1 mutation
+  filter(fitD05D03 >= -1)  # Keep GOF mutants with fitness >= -1
+
+# Count unique mutIDs
+GOF_mutIDinfo15_1AA_count <- GOF_mutants %>%
+  distinct(mutID) %>%
+  nrow()
+
+# Step 3: Count how many of the original LOF_IDs have associated GOF mutants
+LOF_IDs_with_GOF_mutants <- GOF_mutants %>%
+  distinct(ID) %>%
+  nrow()
+
+# Format and print the results
+formatted_LOF_IDs_count <- format(length(LOF_IDs), big.mark = ",")
+formatted_mutants_count <- format(GOF_mutIDinfo15_1AA_count, big.mark = ",")
+formatted_LOF_IDs_with_GOF_mutants <- format(LOF_IDs_with_GOF_mutants, big.mark = ",")
+
+print(paste("Number of original IDs (mutations == 0) with fitD05D03 < -1:", formatted_LOF_IDs_count))
+print(paste("Number of unique mutIDs with 1 mutation associated with these IDs and fitD05D03 >= -1:", formatted_mutants_count))
+print(paste("Number of original IDs that have associated mutants meeting the criteria:", formatted_LOF_IDs_with_GOF_mutants))
+```
+
+**Both Plots:** Plot both graphs together:
+```{r}
+patch1 <- (L15_perfects_complementation_density | L15_mutants_complementation_density)
+patch1
+
+patch2 <- (L15_perfects_complementation_density | L15_mutants_complementation_density) / L15_perfects_mutants_complementation_density
+patch2
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="GOF/PLOTS/Lib15_Complementation_Perfects_Mutants_Together_low_high_fitness_density.png", plot=patch1,
+       width=10, height=5, units="in")
+
+#Saving 6 x 5 in images
+ggsave(file="GOF/PLOTS/Lib15_Complementation_Perfects_Mutants_Both_low_high_fitness_density.png", plot=patch2,
+       width=5, height=5, units="in")
+```
+
+Count the number of unique perfects with fitness > -1 and fitness < -1:
+```{r class.output="goodCode"}
+# Assuming L15_perfects_complementation is already defined
+unique_ID_counts_perfects <- L15_perfects_complementation %>%
+  group_by(ID) %>%
+  summarise(
+    min_fitness = min(fitD05D03, na.rm = TRUE),
+    max_fitness = max(fitD05D03, na.rm = TRUE),
+    all_na = all(is.na(fitD05D03))
+  ) %>%
+  mutate(fitness_category = case_when(
+    all_na ~ "All NA",
+    !is.finite(min_fitness) & !is.finite(max_fitness) ~ "All NA",
+    max_fitness < -1 ~ "All less than -1",
+    min_fitness > -1 ~ "All greater than -1",
+    TRUE ~ "Spans -1"
+  )) %>%
+  group_by(fitness_category) %>%
+  summarise(count = n())
+
+print("Unique ID counts for perfects by fitness category:")
+print(unique_ID_counts_perfects)
+
+total_unique_IDs_perfects <- n_distinct(L15_perfects_complementation$ID)
+print(paste("Total number of unique IDs in perfects:", total_unique_IDs_perfects))
+
+IDs_with_valid_fitness_perfects <- L15_perfects_complementation %>%
+  filter(!is.na(fitD05D03)) %>%
+  n_distinct(.$ID)
+
+print(paste("Number of unique IDs in perfects with at least one valid fitD05D03:", IDs_with_valid_fitness_perfects))
+
+# Additional information: count of rows for each fitness category
+rows_per_category_perfects <- L15_perfects_complementation %>%
+  mutate(fitness_category = case_when(
+    is.na(fitD05D03) ~ "NA",
+    fitD05D03 < -1 ~ "Less than -1",
+    fitD05D03 > -1 ~ "Greater than -1",
+    TRUE ~ "Equal to -1"
+  )) %>%
+  group_by(fitness_category) %>%
+  summarise(row_count = n())
+
+print("Number of rows in each fitness category for perfects:")
+print(rows_per_category_perfects)
+```
+
+Count the number of unique mutants with fitness > -1 and fitness < -1:
+```{r class.output="goodCode"}
+# Count mutants from L15_mutants_complementation dataset
+unique_mutID_counts <- L15_mutants_complementation %>%
+  group_by(mutID) %>%
+  summarise(
+    min_fitness = min(fitD05D03, na.rm = TRUE),
+    max_fitness = max(fitD05D03, na.rm = TRUE),
+    all_na = all(is.na(fitD05D03))
+  ) %>%
+  mutate(fitness_category = case_when(
+    all_na ~ "All NA",
+    !is.finite(min_fitness) & !is.finite(max_fitness) ~ "All NA",
+    max_fitness < -1 ~ "All less than -1",
+    min_fitness > -1 ~ "All greater than -1",
+    TRUE ~ "Spans -1"
+  )) %>%
+  group_by(fitness_category) %>%
+  summarise(count = n())
+
+print(unique_mutID_counts)
+
+total_unique_mutIDs <- n_distinct(L15_mutants_complementation$mutID)
+print(paste("Total number of unique mutIDs:", total_unique_mutIDs))
+
+mutIDs_with_valid_fitness <- L15_mutants_complementation %>%
+  filter(!is.na(fitD05D03)) %>%
+  n_distinct(.$mutID)
+
+print(paste("Number of unique mutIDs with at least one valid fitD05D03:", mutIDs_with_valid_fitness))
+
+# Additional information: count of rows for each fitness category
+rows_per_category <- L15_mutants_complementation %>%
+  mutate(fitness_category = case_when(
+    is.na(fitD05D03) ~ "NA",
+    fitD05D03 < -1 ~ "Less than -1",
+    fitD05D03 > -1 ~ "Greater than -1",
+    TRUE ~ "Equal to -1"
+  )) %>%
+  group_by(fitness_category) %>%
+  summarise(row_count = n())
+
+print("Number of rows in each fitness category:")
+print(rows_per_category)
+```
+
+### Dropout Perfects
+
+Start by retrieving all dropout perfects with a log-fold change value less than -1.0 and corresponding GoF mutants with a log-fold change value greater than -1.0. Use the `mut_collapse_15` dataset which includes 797 perfects (mutations = 0; numprunedBCs = 5) and 12,174 mutants with up to 5 AA distance and at least 1 BC (numprunedBCs = 1) matching to a perfect variant in the dataset.
+```{r}
+# Step 1: Identify IDs that have rows where mutations == 0 and fitD05D03 < -1.0
+dropout15_ids_with_zero_mutations <- mut_collapse_15 %>%
+  filter(mutations == 0 & fitD05D03 < -1.0) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Step 2: Filter the main dataset to keep mutants with fitness > -1.0 if they match a corresponding perfect ID
+dropout_mutants15_GOF <- mut_collapse_15 %>%
+  filter(
+    (mutations == 0 & fitD05D03 < -1.0) |
+    #(mutations != 0 & ID %in% dropout15_ids_with_zero_mutations & !is.na(fitD05D03))) %>%
+    (mutations != 0 & fitD05D03 > -1.0 & ID %in% dropout15_ids_with_zero_mutations)) %>%
+  dplyr::select(ID, mutID, numprunedBCs, mutations, fitD05D03, seq)
+```
+
+Validate that rows where mutations != 0 have an ID that matches rows where mutations == 0 and fitD05D03 < -1.0.
+```{r class.output="goodCode"}
+# 1. First, create two subsets of the data
+zero_mutation_rows <- dropout_mutants15_GOF %>%
+  filter(mutations == 0 & fitD05D03 < -1.0)
+
+non_zero_mutation_rows <- dropout_mutants15_GOF %>%
+  #filter(mutations != 0)
+  filter(mutations != 0 & fitD05D03 > -1.0)
+
+# 2. Check that all IDs in non_zero_mutation_rows are present in zero_mutation_rows
+all_valid_ids <- all(non_zero_mutation_rows$ID %in% zero_mutation_rows$ID)
+print(paste("All non-zero mutation rows have a matching zero mutation row:", all_valid_ids))
+
+# 3. If the above is FALSE, find the problematic IDs
+if (!all_valid_ids) {
+  problematic_ids <- setdiff(non_zero_mutation_rows$ID, zero_mutation_rows$ID)
+  print("IDs with non-zero mutations but no matching zero mutation row:")
+  print(problematic_ids)
+}
+
+# 4. Check for any IDs in zero_mutation_rows that don't have a corresponding non-zero mutation row
+ids_without_non_zero <- setdiff(zero_mutation_rows$ID, non_zero_mutation_rows$ID)
+print("IDs with zero mutations but no corresponding non-zero mutation rows:")
+print(ids_without_non_zero)
+
+# 5. Summary statistics
+print(paste("Number of unique IDs in zero mutation rows:", n_distinct(zero_mutation_rows$ID)))
+print(paste("Number of unique IDs in non-zero mutation rows:", n_distinct(non_zero_mutation_rows$ID)))
+
+# 6. Distribution of mutation counts for non-zero mutation rows
+mutation_distribution <- non_zero_mutation_rows %>%
+  group_by(mutations) %>%
+  summarise(count = n()) %>%
+  arrange(mutations)
+
+print("Distribution of mutation counts:")
+print(mutation_distribution)
+
+# 7. Check for any unexpected mutation values
+unexpected_mutations <- dropout_mutants15_GOF %>%
+  filter(mutations < 0 | mutations > 5)  # Adjust the upper bound as needed
+
+if (nrow(unexpected_mutations) > 0) {
+  print("Rows with unexpected mutation values:")
+  print(unexpected_mutations)
+} else {
+  print("No unexpected mutation values found.")
+}
+```
+
+Remove unique perfect IDs if there is no corresponding mutants with fitness greater than -1.0:
+```{r class.output="goodCode"}
+# Step 1: Identify IDs with zero mutations
+zero_mutation_ids <- dropout_mutants15_GOF %>%
+  filter(mutations == 0 & fitD05D03 < -1.0) %>%
+  pull(ID)
+
+# Step 2: Identify IDs with non-zero mutations
+non_zero_mutation_ids <- dropout_mutants15_GOF %>%
+  filter(mutations != 0 & fitD05D03 > -1.0) %>%
+  pull(ID)
+
+# Step 3: Find IDs that have zero mutations but no corresponding non-zero mutation rows
+ids_to_remove <- setdiff(zero_mutation_ids, non_zero_mutation_ids)
+
+# Step 4: Remove the rows with these IDs
+dropout_mutants15_GOF_cleaned <- dropout_mutants15_GOF %>%
+  filter(!(ID %in% ids_to_remove))
+
+# Print summary
+print(paste("Number of rows before cleaning:", nrow(dropout_mutants15_GOF)))
+print(paste("Number of rows after cleaning:", nrow(dropout_mutants15_GOF_cleaned)))
+print(paste("Number of rows removed:", nrow(dropout_mutants15_GOF) - nrow(dropout_mutants15_GOF_cleaned)))
+print(paste("Number of unique IDs removed:", length(ids_to_remove)))
+
+# Optionally, you can print the removed IDs
+print("IDs removed:")
+print(ids_to_remove)
+
+# Assign the cleaned data back to dropout_mutants15_GOF if you want to update the original variable
+dropout_mutants15_GOF <- dropout_mutants15_GOF_cleaned
+```
+
+### Dropout Mutants
+Summarize the number of perfects and mutants at each AA distance after filtering:
+```{r class.output="goodCode"}
+# Create a function to count unique mutIDs for a given number of mutations
+dropout_mutants15_GOF_count <- function(data, mutation_count) {
+  length(unique(subset(data, mutations == mutation_count)$mutID))
+}
+
+# Create a vector of counts for mutations 1-5
+dropout15_counts <- sapply(1:5, function(x) dropout_mutants15_GOF_count(dropout_mutants15_GOF, x))
+
+# Count perfects separately
+perfects_count <- length(unique(subset(dropout_mutants15_GOF, mutations == 0 & fitD05D03 < -1.0)$mutID))
+
+# Create a data frame with the results, including the summary row
+dropout_mutants15_GOF_table <- data.frame(
+  Mutations = c("Perfects (fit < -1.0)", "1 Mutation", "2 Mutations", "3 Mutations", "4 Mutations", "5 Mutations", "Total Mutations"),
+  Count = c(perfects_count, dropout15_counts, sum(dropout15_counts))
+)
+
+# Print the table
+print(dropout_mutants15_GOF_table)
+```
+
+```{r echo=FALSE}
+# Save as .csv for use in other RMD files:
+write.csv(dropout_mutants15_GOF, 'GOF/OUTPUT/Comp/Lib15.D05D03.gof.1numprunedBCs.5AA.muts.fitness-1.csv',
+          row.names = FALSE, quote=FALSE)
+```
+
+### GOF Fitness
+
+**GoF Fitness:** Separate the `dropout_mutants15_GOF` dataset into two new dataframes, where DF1 contains perfects and DF2 contains mutants:
+```{r}
+# Create a dataframe with mutations == 0
+dropout_mutants15_GOF_no_mutations <- dropout_mutants15_GOF[dropout_mutants15_GOF$mutations == 0, ]
+
+# Create a dataframe with mutations != 0
+dropout_mutants15_GOF_with_mutations <- dropout_mutants15_GOF[dropout_mutants15_GOF$mutations != 0, ]
+
+# ALTERNATIVE: Create a dataframe with mutations == 1 (only uses 1 aa mutation variants)
+#dropout_mutants15_GOF_with_mutations <- dropout_mutants15_GOF[dropout_mutants15_GOF$mutations == 1, ]
+```
+
+Now, re-combine these dataframes to calculate the fitness change (delta) between mutants and their parent homologs:
+```{r class.output="goodCode"}
+# Step 1: Prepare the reference dataframe
+df_reference <- dropout_mutants15_GOF_no_mutations %>%
+  select(ID, fitD05D03) %>%
+  rename(reference_fitD05D03 = fitD05D03)
+
+# Step 2: Join and calculate the difference
+dropout_mutants15_GOF_fitness <- dropout_mutants15_GOF_with_mutations %>%
+  left_join(df_reference, by = "ID") %>%
+  mutate(fitD05D03 = fitD05D03 - reference_fitD05D03) %>%
+  select(ID, mutID, mutations, fitD05D03)
+
+# Print summary statistics
+print(paste("Number of Mutants:", nrow(dropout_mutants15_GOF_fitness)))
+print(paste("Unique IDs:", length(unique(dropout_mutants15_GOF_fitness$ID))))
+print(paste("Range of fitD05D03:", 
+            paste(round(range(dropout_mutants15_GOF_fitness$fitD05D03, na.rm = TRUE), 1), collapse = " to ")))
+```
+
+**Boxplot:** Plot mutant fitness relative to parent variant by number of mutations:
+```{r}
+GOF_muts_fitness_by_muts_plot <- ggplot(dropout_mutants15_GOF_fitness, 
+                                        aes(x = factor(mutations), y = fitD05D03)) +
+  geom_boxplot() +
+  labs(title = "fitD05D03 by Number of Mutations", x = "Number of Mutations", y = "fitD05D03")
+
+print(GOF_muts_fitness_by_muts_plot)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/Comp/GOF.mut.fitness.by.mutations.complementation.png", 
+       plot =GOF_muts_fitness_by_muts_plot,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+**Histogram of Mutant Fitness:** Clearly shows mutant fitness is normally distributed.
+```{r}
+GOF_muts_fitness_dist_plot <- ggplot(dropout_mutants15_GOF_fitness, aes(x = fitD05D03)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black") +
+  labs(title = "Distribution of fitD05D03", x = "fitD05D03", y = "Count")
+
+print(GOF_muts_fitness_dist_plot)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/Comp/GOF.mut.fitness.distribution.complementation.v2.png", 
+       plot =GOF_muts_fitness_dist_plot,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+### GOF Alignment
+
+**FASTA:** Generate a FASTA file from the filtered `dropout_mutants15_GoF` perfects dataset based on shared perfects IDs with 1-AA mutation for GoF analysis:
+```{r}
+# First, let's ensure we have the correct unique IDs for mutations == 1
+dropout_mutants15_GOF_1mut_unique_ids <- dropout_mutants15_GOF_fitness %>%
+  filter(mutations == 1) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Now, let's use these IDs to filter the dropout_mutants15_GOF dataset
+dropout_mutants15_GOF_1mut_unique_id_seq <- dropout_mutants15_GOF %>%
+  filter(ID %in% dropout_mutants15_GOF_1mut_unique_ids & mutations == 0) %>%
+  select(ID, seq)
+
+# Create the sequences in FASTA format
+dropout_mutants15_GOF_fasta_content <- paste(">", dropout_mutants15_GOF_1mut_unique_id_seq$ID, "\n", dropout_mutants15_GOF_1mut_unique_id_seq$seq, "\n", sep = "", collapse = "")
+
+# Define the file path in the working directory
+dropout_mutants15_GOF_fasta_file_path <- file.path(getwd(), "GOF/MSA_Dropouts/Comp/FASTA/Lib15.GoF.perfects.complementation.fasta")
+
+# Write the FASTA content to the file
+writeLines(dropout_mutants15_GOF_fasta_content, 
+           con = dropout_mutants15_GOF_fasta_file_path)
+```
+
+**Alignment:** Use the `clustalo` executable to align the protein sequences associated with the dropout perfects. This will align the FASTA file: **Lib15.GoF.perfects.complementation.fasta** for use in GoF analysis.
+```{bash}
+./Scripts/clustalo -i GOF/MSA_Dropouts/Comp/FASTA/Lib15.GoF.perfects.complementation.fasta -o GOF/MSA_Dropouts/Comp/FASTA/Lib15.GoF.perfects.complementation.tree.aligned.mod.aln --outfmt=clustal --force
+```
+
+**Mapping Residues:** Use the following `map.aligned.residues.py` python script to generate csv files for each designed homolog that maps residue positions of each A.A. from the alignment FASTA:
+```{python}
+import time
+import csv
+
+##################################
+#INPUTS:
+
+base_path = ""
+trees_path_prefix = base_path+""
+
+#clustal format alignment file
+align_file_in = [trees_path_prefix+"GOF/MSA_Dropouts/Comp/FASTA/Lib15.GoF.perfects.complementation.tree.aligned.mod.aln"]
+
+#number of seqs in each alignment file
+num_samples_in_file = [197] #New FASTA w/ mutant fit > -1 (+1 from actual file count)
+
+##################################
+#OUTPUTS:
+
+msa_map_out_path = [trees_path_prefix+"GOF/MSA_Dropouts/Comp/"]
+
+# Loop to generate .csv files for each ID
+for alni in range(1):#len(align_file_in)):
+    #print(alni)
+    
+    ##################################
+    #VARIABLES:
+    
+    #ID as key, align as value
+    align_dict = dict()
+    
+    #num_samples = 419
+    num_samples = num_samples_in_file[alni]
+    
+    #pos key, consensus pos val
+    IDaadictlist = [dict() for x in range(num_samples)]
+    
+    IDtoindexdict = dict()
+    indexdtoIDict = dict()
+    
+    ##################################
+    #CODE:
+    
+    line_count = 0
+    #loop over all alignments:
+    print(align_file_in[alni])
+    for line in open(align_file_in[alni]):
+        #skip header
+        if line_count > 1:
+            listWords = line.split('    ')
+            ID = listWords[0]
+            align = line[16:].rstrip()
+            if ID.strip() != "":
+                align_dict[ID] = align_dict.get(ID, "") + align.replace(" ", "")
+        line_count += 1
+    
+    #print("NP_414590")
+    #print(align_dict["NP_414590"])
+
+    counter = 0
+    for ID in align_dict:
+        #print(ID)
+        #print(align_dict[ID])
+        IDtoindexdict[ID] = counter
+        indexdtoIDict[counter]=ID
+        align = align_dict[ID]
+        
+        aacounter = 1
+        
+        
+        for i in range(len(align)):
+            if align[i] != "-":
+                
+                #print(str(counter)+" "+str(aacounter))
+                IDaadictlist[counter][aacounter]=i+1
+                aacounter += 1
+        counter += 1
+        
+    #print(len(IDaadictlist))
+    for i in range(len(IDaadictlist)-1):
+        #print(indexdtoIDict[i])
+        #print(i)
+        #print(alni)
+        #print(indexdtoIDict[i])
+        csvfile = open(str(msa_map_out_path[alni]+indexdtoIDict[i]+".csv"), 'w')
+        fieldnames = ['orth_aanum','msa_aanum']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for j in IDaadictlist[i]:
+            #print(str(j)+" "+str(IDaadictlist[i][j]))
+            #save all data:
+            writer.writerow({'orth_aanum':str(j),'msa_aanum':str(IDaadictlist[i][j])})
+        csvfile.close()
+```
+
+### GOF Plots
+
+Find GoF Perfects for Dropouts
+```{r}
+# Create a data frame of unique IDs
+mutants15_to_plot <- dropout_mutants15_GOF_fitness %>%
+  filter(mutations == 1) %>%
+  distinct(ID) %>%
+  select(ID)
+```
+
+```{r class.output="goodCode"}
+# Initialize an empty vector to store IDs of mutants to be removed
+mutants_to_remove <- character()
+
+# Check for missing MSA files
+for (i in 1:nrow(mutants15_to_plot)) {
+  mutant15_current_temp <- mutants15_to_plot$ID[i]
+  if (!file.exists(paste("GOF/MSA_Dropouts/Comp/", mutant15_current_temp, ".csv", sep = ""))) {
+    mutants_to_remove <- c(mutants_to_remove, mutant15_current_temp)
+  }
+}
+
+# Output the results
+if (length(mutants_to_remove) > 0) {
+  cat("The following mutants will be removed due to missing MSA files:\n")
+  print(mutants_to_remove)
+  cat("\nTotal number of mutants to be removed:", length(mutants_to_remove), "\n")
+  
+  # Remove the mutants without MSA files
+  mutants15_to_plot <- mutants15_to_plot[!mutants15_to_plot$ID %in% mutants_to_remove, ]
+  cat("\nMutants remaining:", nrow(mutants15_to_plot), "\n")
+} else {
+  cat("All mutants have corresponding MSA files. No mutants will be removed.\n")
+}
+
+# If you want to see the remaining mutants
+print(mutants15_to_plot)
+```
+
+Read in the E. coli map:
+```{r}
+ecoli_map <- read.csv(file=paste("GOF/MSA_Dropouts/Comp/NP_414590.csv", sep=""), head=TRUE, sep=",")
+```
+
+Make a new data frame which will keep all info
+```{r}
+GOF_fitness_map <- data.frame(position=numeric(),
+                              aa=character(),
+                              mutations=numeric(),
+                              fitness=numeric(),
+                              posortho=numeric(),
+                              ingap=character(),
+                              mutID=character(),
+                              ID=character())
+
+aminoacids <- data.frame(aa=c('G','P','A','V','L','I','M','C','F','Y','W','H','K','R','Q','N','E','D','S','T','X'),
+                         aanum=c(1:21))
+```
+
+**MSA Mapping:** Map the mutants (fitness difference from perfects > 0.5) over all perfects (fit < -1) for GoF analysis:
+```{r class.output="goodCode"}
+#loop over all perfects
+for (iii in 1:nrow(mutants15_to_plot)){
+  
+  #current ortholog:
+  mutant_current <- as.character(mutants15_to_plot$ID[iii])
+  
+  #length of name
+  name_size = nchar(paste(mutant_current,"_",sep=""))
+  
+  #get the MSA mapping
+  mutant_map <- read.csv(file=paste("GOF/MSA_Dropouts/Comp/",mutant_current,".csv",sep=""),
+                         head=TRUE,sep=",")
+  
+  #grab the mutants with a fitness increase (GoF) of at least 0.5 (do not include perfects from dataset)
+  GOFmutIDinfo_temp <- dropout_mutants15_GOF_fitness %>% ###UPDATED CODE
+    filter(ID == mutant_current) %>%
+    filter(mutations != 0) %>% ###UPDATED CODE
+    filter(fitD05D03 >= 0.5) ###CHANGE VALUE AS NEEDED (>= 0.5 is default)
+  
+  # Check if GOFmutIDinfo_temp is empty
+  if(nrow(GOFmutIDinfo_temp) == 0) {
+    warning(paste("No non-zero mutation data found for ID:", mutant_current))
+    next  # Skip to the next iteration of the outer loop
+  }
+  
+  #loop over all mutants for this construct:
+  for (mn in 1:nrow(GOFmutIDinfo_temp)) {
+    
+    #this mutants fitness
+    gof_fit_temp <- GOFmutIDinfo_temp$fitD05D03[mn]  # or whichever fitness column you're using
+    
+    #grab the mut name
+    mutations_names <- as.character(GOFmutIDinfo_temp$mutID[mn])
+    
+    #grab only the relevant portion of the name
+    mutations_names <- substr(mutations_names, name_size+1, nchar(mutations_names))
+    
+    ## split mutation string at non-digits
+    s <- strsplit(mutations_names, "_")
+    
+    for (mutnum in 1:GOFmutIDinfo_temp$mutations[mn]){
+      
+      #grab the corresponding mutation string
+      mutcurr<-s[[1]][mutnum]
+      
+      #get the position
+      mutpos <- as.numeric(str_extract(mutcurr, "[0-9]+"))
+      
+      #get ending aa
+      to_aa <- substr(mutcurr, nchar(mutpos)+2, nchar(mutcurr))
+      
+      #find the number in the consensus seq
+      gof_cons_aanum_index <- which(mutant_map$orth_aanum == mutpos)
+      
+      if (length(gof_cons_aanum_index) > 0) {
+        gof_cons_aanum <- mutant_map$msa_aanum[gof_cons_aanum_index]
+        
+        #does this map to a non-gap
+        if (gof_cons_aanum %in% ecoli_map$msa_aanum){
+          
+          #the corresponding e.coli residue
+          e_coli_residue <- ecoli_map$orth_aanum[which(ecoli_map$msa_aanum == gof_cons_aanum)]
+          
+          #add this point to the data
+          GOF_fitness_map <- rbind(GOF_fitness_map,
+                                   data.frame(position=e_coli_residue,
+                                              aa=to_aa,
+                                              mutations=GOFmutIDinfo_temp$mutations[mn],
+                                              fitness=gof_fit_temp,
+                                              posortho=mutpos,
+                                              ingap="No",
+                                              mutID=GOFmutIDinfo_temp$mutID[mn],
+                                              ID=GOFmutIDinfo_temp$ID[mn]))
+          
+        } else {
+          #if it's here it maps to a gap
+          
+          #add this point to the data
+          GOF_fitness_map <- rbind(GOF_fitness_map,
+                                   data.frame(position=-1,
+                                              aa=to_aa,
+                                              mutations=GOFmutIDinfo_temp$mutations[mn],
+                                              fitness=gof_fit_temp,
+                                              posortho=mutpos,
+                                              ingap="Yes",
+                                              mutID=GOFmutIDinfo_temp$mutID[mn],
+                                              ID=GOFmutIDinfo_temp$ID[mn]))
+          
+        }
+      } else {
+        warning(paste("No matching orth_aanum found for mutpos:", mutpos, "in ID:", mutant_current))
+        # You might want to handle this case, perhaps by skipping this mutation or adding it to a separate list for review
+      }
+    }
+  }
+}
+```
+
+```{r echo=FALSE}
+write.table(GOF_fitness_map, file = "GOF/OUTPUT/Comp/GOF_fitness_map.csv", 
+            sep = ",", row.names = F,quote=F,col.names = T)
+```
+
+Collapse the GOF fitness values by aa position along the protein sequence:
+```{r}
+GOF_fitness_collapsed_by_pos <- GOF_fitness_map %>%
+  filter(position > 0) %>%
+  group_by(position) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness),
+            numortho=length(unique(ID)))
+```
+
+#### GOF Mutant No. Plot
+
+Plot the number of gain-of-function mutants recovered for each aa position along the protein sequence and include cutoff lines for 1 SD above the mean number of GOF mutants and 2 SD above the mean number of GOF mutants. All positions with GOF mutants above the 2 SD line are considered significant positions positively influencing the parent variants ability to complement metabolic function in the E. coli knockout model.
+```{r}
+GoF_plot <- ggplot(GOF_fitness_collapsed_by_pos, aes(x=position, y=numpoints, color=numortho)) +
+  geom_segment(aes(x = 0, y = mean(numpoints)+2*sd(numpoints), 
+                   xend = 160, 
+                   yend = mean(numpoints)+2*sd(numpoints)),linetype=2,colour = "red2")+
+  geom_segment(aes(x = 0, y = mean(numpoints), xend = 160, yend = mean(numpoints)),linetype=2,colour = "darkblue")+
+  geom_point(size=1.8)+
+  labs(x = "Position (aa)", y ="Number of gain-of-function mutants",color="") +
+  scale_color_gradientn(colours = c("darkblue", "red"),
+                        name="Num.\nUniq.\nHomo.",
+                        na.value="grey", 
+                        limits = c(0,1.1*max(GOF_fitness_collapsed_by_pos$numortho))) +
+  scale_x_continuous(breaks=seq(0,160,20))+
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 1.0), 
+        axis.ticks = element_line(colour = "black", size = 1.0),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = "none")
+
+# Add marginal plot
+GoF_plot_with_marginal <- ggExtra::ggMarginal(GoF_plot,
+                                              type = "histogram",
+                                              margins = "y",
+                                              bins=21,
+                                              col = 'black',
+                                              fill = 'red2')
+
+# Display the plot
+print(GoF_plot_with_marginal)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/Comp/GOF.Mutant.by.AA.Position.2sigma.complementation.png", 
+       plot = GoF_plot_with_marginal,
+       width = 4, height = 4.5, units = "in")
+```
+
+Print out a summary table of significant aa position along the protein sequence
+```{r class.output="goodCode"}
+GOF_fitness_collapsed_by_pos_2sigma <- GOF_fitness_collapsed_by_pos %>%
+  filter(numpoints >= (mean(GOF_fitness_collapsed_by_pos$numpoints)+2*sd(GOF_fitness_collapsed_by_pos$numpoints)))
+print(GOF_fitness_collapsed_by_pos_2sigma)
+```
+
+Calculate all Data and Stats:
+```{r}
+GOF_fitness_collapsed_all <- GOF_fitness_map %>%
+  filter(position > 0) %>%
+  group_by(position, aa) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness),
+            numortho=length(unique(ID)))
+
+gof_aa_dim <- nrow(aminoacids)
+gof_ref_len <- nrow(ecoli_map)
+```
+
+```{r warning=FALSE}
+#these matrices have the fitness/num/sd for each aa at each position:
+gof_matrix = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_num = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_sd = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_numortho = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+
+#populate matrix
+for (i in 1:nrow(GOF_fitness_collapsed_all)){
+  
+  gof_matrix[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all$aa[i])),GOF_fitness_collapsed_all$position[i]] <- as.numeric(GOF_fitness_collapsed_all$fitval[i])
+  gof_matrix_num[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all$aa[i])),GOF_fitness_collapsed_all$position[i]] <- as.numeric(GOF_fitness_collapsed_all$numpoints[i])
+  gof_matrix_sd[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all$aa[i])),GOF_fitness_collapsed_all$position[i]] <- as.numeric(GOF_fitness_collapsed_all$stdfit[i])
+  gof_matrix_numortho[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all$aa[i])),GOF_fitness_collapsed_all$position[i]] <- as.numeric(GOF_fitness_collapsed_all$numortho[i])
+}
+
+rownames(gof_matrix)<-aminoacids$aa
+colnames(gof_matrix)<-c(1:gof_ref_len)
+rownames(gof_matrix_num)<-aminoacids$aa
+colnames(gof_matrix_num)<-c(1:gof_ref_len)
+rownames(gof_matrix_sd)<-aminoacids$aa
+colnames(gof_matrix_sd)<-c(1:gof_ref_len)
+rownames(gof_matrix_numortho)<-aminoacids$aa
+colnames(gof_matrix_numortho)<-c(1:gof_ref_len)
+
+gof_matrix_melt <- melt(gof_matrix)
+gof_matrix_num_melt <- melt(gof_matrix_num)
+gof_matrix_sd_melt <- melt(gof_matrix_sd)
+gof_matrix_numortho_melt <- melt(gof_matrix_numortho)
+
+# Rename columns to "X1" and "X2"
+names(gof_matrix_melt)[names(gof_matrix_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_num_melt)[names(gof_matrix_num_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_sd_melt)[names(gof_matrix_sd_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_numortho_melt)[names(gof_matrix_numortho_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+gof_matrix_melt_only_GOFpos <- gof_matrix_melt %>%
+  filter(X2 == 17 |
+         X2 == 97 |
+         X2 == 98 |
+         X2 == 102 |
+         X2 == 103 |
+         X2 == 104 |
+         X2 == 107)
+
+gof_matrix_melt_only_GOFpos$mutposnum <- 0
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==17)] <- 1
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==97)] <- 2
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==98)] <- 3
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==102)] <- 4
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==103)] <- 5
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==104)] <- 6
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==107)] <- 7
+
+gof_matrix_melt_only_GOFpos$aanum <- 0
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="A")] <- 12
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="C")] <- 10
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="D")] <- 5
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="E")] <- 4
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="F")] <- 19
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="G")] <- 11
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="H")] <- 3
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="I")] <- 15
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="K")] <- 1
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="L")] <- 14
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="M")] <- 16
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="N")] <- 6
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="P")] <- 17
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="Q")] <- 7
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="R")] <- 2
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="S")] <- 9
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="T")] <- 8
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="V")] <- 13
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="W")] <- 20
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="Y")] <- 18
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="X")] <- 21
+
+gof_matrix_melt_only_GOFpos_wnum <- gof_matrix_melt_only_GOFpos %>%
+  inner_join(gof_matrix_num_melt,by=c("X1","X2")) %>%
+  dplyr::rename(mutnum=value.y,value=value.x)
+```
+
+#### GOF Position Plot
+
+Plot the mean fitness of each GoF mutation at the significant positions, with the number of mutants observed at each AA:
+```{r}
+# Define the order of amino acids for the rectangles
+rect_order <- c("E", "G", "R", "Q", "F", "L", "A")
+
+# Create a data frame for the rectangles
+rect_data <- data.frame(
+  aanum = match(rect_order, c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W","X")),
+  xmin = seq(0.5, by = 1, length.out = length(rect_order)),
+  xmax = seq(1.5, by = 1, length.out = length(rect_order)))
+
+#plot the data from all mutants:
+GOF_fit_nummut_plot <- ggplot(gof_matrix_melt_only_GOFpos_wnum, 
+       aes(x=mutposnum, y=aanum,
+           fill=value,
+           label=mutnum)) +
+  geom_tile() +
+  geom_text() +
+  # Add black rectangles
+  geom_rect(data = rect_data,
+            aes(xmin = xmin, xmax = xmax, ymin = aanum - 0.5, ymax = aanum + 0.5),
+            fill = NA, color = "black", inherit.aes = FALSE) +
+  labs(x = "Position (aa)",
+       y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", 
+                      high = "red",
+                      name="Fitness",
+                      na.value="grey",
+                      limit = c(0, max(gof_matrix_melt_only_GOFpos_wnum$value))) +
+  theme_minimal()+
+  scale_x_continuous(name="Position (aa)",
+                     breaks=c(1,2,3,4,5,6,7),
+                     labels=c("17","97","98","102","103","104","107"))+
+  scale_y_continuous(name="Amino acid", 
+                     breaks=c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21),
+                     labels=c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W","X"))
+
+print(GOF_fit_nummut_plot)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/Comp/GOF_Fitness_Number_Mutants_Complementation.pdf", 
+       plot = GOF_fit_nummut_plot,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+Plot the GOF mutant fitness across the protein sequence:
+```{r}
+ggplot(data = gof_matrix_melt, aes(x=X2, y=X1, fill=value)) +
+  geom_tile() +
+  labs(x = "Position (aa)",
+       y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", 
+                       high = "red",
+                       name="Fitness",
+                       na.value="grey",
+                       limit = c(0,max(gof_matrix_melt$value))) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,150,10))
+```
+
+Plot the number of mutants observed at each position along the protein sequence:
+```{r}
+ggplot(data = gof_matrix_num_melt, aes(x=X2, y=X1, fill=value)) +
+  geom_tile()+ 
+  labs(x = "Position (aa)",
+       y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", 
+                      high = "red",
+                      name="#points",
+                      na.value="grey", 
+                      limit = c(0,max(gof_matrix_num_melt$value))) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,150,10))
+```
+
+Plot the number of mutants observed at each position along the protein sequence:
+```{r}
+ggplot(data = gof_matrix_numortho_melt, aes(x=X2, y=X1, fill=value)) +
+  geom_tile()+ 
+  labs(x = "Position (aa)",
+       y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", 
+                      high = "red",
+                      name="#points",
+                      na.value="grey", 
+                      limit = c(0,max(gof_matrix_numortho_melt$value))) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,150,10))
+```
+
+Plot the standard deviation of fitness for each position along the protein sequence:
+```{r}
+ggplot(data = gof_matrix_sd_melt, aes(x=X2, y=X1, fill=value)) +
+  geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient2(low = "blue", 
+                       high = "red", 
+                       mid="gold",
+                       name="std(Fitness)",
+                       na.value="grey", 
+                       limit = c(0,1.1*max(gof_matrix_sd_melt$value))) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,150,10))
+```
+
+#### GOF BMS Position Plot
+
+```{r class.output="goodCode"}
+GOF_fitness_collapsed_by_pos_2sigma_protein_info <- protein_info_1H1T %>%
+  dplyr::rename(position=pos) %>%
+  filter(position %in% GOF_fitness_collapsed_by_pos_2sigma$position) %>%
+  right_join(GOF_fitness_collapsed_by_pos_2sigma,by="position") %>%
+  arrange(position)
+print(GOF_fitness_collapsed_by_pos_2sigma_protein_info)
+```
+
+```{r}
+rsa_vs_cons_plot <- ggplot(GOF_fitness_collapsed_by_pos_2sigma_protein_info,
+             aes(x=cons, y=RSA, color=as.factor(position), fill=as.factor(position), shape=as.factor(position))) +
+  geom_point(alpha=0.9, size=4, stroke=1) +
+  labs(x = "Site Conservation", y ="Relative Solvent Accessibility", color="Residue", fill="Residue", shape="Residue") +
+  scale_color_manual(name = "Residue",
+                     values = c("red", "green", "blue", "purple", "orange", "cyan", "magenta")) +
+  scale_fill_manual(name = "Residue",
+                    values = c("red", "green", "blue", "purple", "orange", "cyan", "magenta")) +
+  scale_shape_manual(name = "Residue",
+                     values = c(21, 22, 23, 24, 25, 21, 22)) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+rsa_vs_cons_plot
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/Comp/GOF_RSA_vs_Cons_Complementation.pdf", 
+       plot = rsa_vs_cons_plot,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+Extract the fitness values for each significant aa position from the BMS analysis:
+```{r class.output="goodCode"}
+BMS_matrix_perfects_and_1_melt_GOFonly <- BMS_matrix15_perfects_and_1_melt %>%
+  filter(X1 != "X") %>%
+  filter(X2 == 17 | X2 == 97 | X2 == 98 | X2 == 102 | X2 == 103 | X2 == 104 | X2 == 107)
+
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum <- 0
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==17)] <- 1
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==97)] <- 2
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==98)] <- 3
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==102)] <- 4
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==103)] <- 5
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==104)] <- 6
+BMS_matrix_perfects_and_1_melt_GOFonly$mutposnum[which(BMS_matrix_perfects_and_1_melt_GOFonly$X2==107)] <- 7
+
+BMS_matrix_perfects_and_1_melt_GOFonly_wnum <- BMS_matrix_perfects_and_1_melt_GOFonly %>%
+  inner_join(BMS_matrix15_perfects_and_1_num_melt,by=c("X1","X2")) %>%
+  dplyr::rename(mutnum=value.y,value=value.x)
+
+names(BMS_matrix_perfects_and_1_melt_GOFonly_wnum)
+```
+
+Determine the minimum and maximum fitness values for plotting:
+```{r class.output="goodCode"}
+min(BMS_matrix_perfects_and_1_melt_GOFonly$value, na.rm = TRUE)
+max(BMS_matrix_perfects_and_1_melt_GOFonly$value, na.rm = TRUE)
+```
+
+Plot the fitness values of the significant aa positions based on the BMS analysis for Complementation. Black rectangles indicate the aa corresponding to the WT DHFR homolog. White rectangles indicate the aa with the highest number of mutants for each position along the protein sequence.
+```{r}
+# Define the order of amino acids for the black rectangles
+rect_order <- c("E", "G", "R", "Q", "F", "L", "A")
+
+# Create a data frame for the black rectangles
+rect_data <- data.frame(
+  aanum = match(rect_order, c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W")),
+  xmin = seq(0.5, by = 1, length.out = length(rect_order)),
+  xmax = seq(1.5, by = 1, length.out = length(rect_order)))
+
+# Find the amino acid with the highest mutnum for each position
+highest_mutnum <- BMS_matrix_perfects_and_1_melt_GOFonly_wnum %>%
+  group_by(mutposnum) %>%
+  slice_max(order_by = as.numeric(mutnum), n = 1) %>%
+  ungroup()
+
+# Create the plot
+BMS_GoF_fit_plot <- ggplot(BMS_matrix_perfects_and_1_melt_GOFonly_wnum, 
+       aes(x=mutposnum, y=aanum,
+           fill=value,
+           label=mutnum)) +
+  geom_tile() +
+  geom_text() +
+  # Add black rectangles
+  geom_rect(data = rect_data,
+            aes(xmin = xmin, xmax = xmax, ymin = aanum - 0.5, ymax = aanum + 0.5),
+            fill = NA, color = "black", inherit.aes = FALSE) +
+  # Add white rectangles around the highest mutnum
+  geom_rect(data = highest_mutnum,
+            aes(xmin = mutposnum - 0.5, xmax = mutposnum + 0.5, 
+                ymin = aanum - 0.5, ymax = aanum + 0.5),
+            fill = NA, color = "white", size = 1, inherit.aes = FALSE) +
+  labs(x = "Position (aa)",
+       y ="Amino acid", color="") +
+  scale_fill_gradient2(low = "blue", high = "red", mid="gold",
+                       name="Fitness", na.value="grey", 
+                       limit = c(-3,1)) +
+  theme_minimal() +
+  scale_x_continuous(name="Position (aa)", 
+                     breaks=c(1,2,3,4,5,6,7),
+                     labels=c("17","97","98","102","103","104","107")) +
+  scale_y_continuous(name="Amino acid", 
+                     breaks=c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20),
+                     labels=c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W"))
+
+print(BMS_GoF_fit_plot)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/Comp/GOF_BMS_Fitness_Number_Mutants_Complementation.png", 
+       plot = BMS_GoF_fit_plot,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+## MIC (0.5 ug/mL TMP)
+
+### Dropout Perfects
+
+Retrieving all dropout perfects with a log-fold change value less than -1.0 from the **COMPLEMENTATION** dataset. Then, retrieve the same perfects (ID) from the **MIC** dataset and all corresponding mutants. Use the `mut_collapse_15` dataset which includes 797 perfects (mutations = 0; numprunedBCs = 5) and 12,174 mutants with up to 5 AA distance and at least 1 BC (numprunedBCs = 1) matching to a perfect variant in the dataset.
+```{r}
+# Step 1: Identify IDs that have rows where mutations == 0 and fitD05D03 < -1.0 in COMPLEMENTATION
+dropout15_ids_with_zero_mutations_complement <- mut_collapse_15 %>%
+  filter(mutations == 0 & fitD05D03 > -1.0) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Step 2: Identify the same IDs that have mutations == 0 and fitD07D03 < -1.0 in MIC
+dropout15_ids_with_zero_mutations_mic <- mut_collapse_15 %>%
+  filter(ID %in% dropout15_ids_with_zero_mutations_complement & 
+         mutations == 0 & 
+         fitD07D03 < -1.0) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Step 3: Retrieve the rows for these IDs
+result_rows <- mut_collapse_15 %>%
+  filter(ID %in% dropout15_ids_with_zero_mutations_mic & mutations == 0)
+
+# Step 4: Filter the main dataset to keep mutants (with 1-AA) if they match a corresponding perfect ID
+dropout_mutants15_GOF_mic <- mut_collapse_15 %>%
+  filter(
+    (mutations == 0 & !is.na(fitD05D03) & fitD05D03 > -1.0 & 
+     !is.na(fitD07D03) & fitD07D03 < -1.0) |
+    (mutations != 0 & fitD07D03 > -1.0 & ID %in% dropout15_ids_with_zero_mutations_mic)) %>%
+  dplyr::select(ID, mutID, numprunedBCs, mutations, fitD05D03, fitD07D03, seq)
+```
+
+Validate that rows where mutations != 0 have an ID that matches rows where mutations == 0 and fitD05D03 < -1.0.
+```{r class.output="goodCode"}
+# Verification step
+verification_result_mic <- dropout_mutants15_GOF_mic %>%
+  filter(mutations == 0) %>%
+  mutate(
+    condition_met = fitD05D03 > -1.0 & fitD07D03 < -1,
+    fitD05D03_check = fitD05D03 > -1.0,
+    fitD07D03_check = fitD07D03 < -1
+  )
+
+# Check if all rows meet the condition
+all_conditions_met_mic <- all(verification_result_mic$condition_met)
+
+# Summary of the verification
+verification_summary_mic <- verification_result_mic %>%
+  summarise(
+    total_rows = n(),
+    rows_meeting_both_conditions = sum(condition_met),
+    rows_meeting_fitD05D03 = sum(fitD05D03_check),
+    rows_meeting_fitD07D03 = sum(fitD07D03_check)
+  )
+
+# Print results
+print("Verification Summary:")
+print(verification_summary_mic)
+print(paste("All conditions met:", all_conditions_met_mic))
+
+# If there are any rows not meeting the conditions, display them
+if (!all_conditions_met_mic) {
+  print("Rows not meeting both conditions:")
+  print(verification_result_mic %>% filter(!condition_met) %>% select(ID, fitD05D03, fitD07D03))
+}
+```
+
+Validate that rows where mutations != 0 have an ID that matches rows where mutations == 0 and fitD07D03 < -1.0.
+```{r class.output="goodCode"}
+# 1. First, create two subsets of the data
+zero_mutation_rows_mic <- dropout_mutants15_GOF_mic %>%
+  filter(mutations == 0 & fitD07D03 < -1.0)
+
+non_zero_mutation_rows_mic <- dropout_mutants15_GOF_mic %>%
+  filter(mutations != 0 & fitD07D03 > -1.0)
+
+# 2. Check that all IDs in non_zero_mutation_rows are present in zero_mutation_rows
+all_valid_ids_mic <- all(non_zero_mutation_rows_mic$ID %in% zero_mutation_rows_mic$ID)
+print(paste("All non-zero mutation rows have a matching zero mutation row:", all_valid_ids_mic))
+
+# 3. If the above is FALSE, find the problematic IDs
+if (!all_valid_ids_mic) {
+  problematic_ids_mic <- setdiff(non_zero_mutation_rows_mic$ID, zero_mutation_rows_mic$ID)
+  print("IDs with non-zero mutations but no matching zero mutation row:")
+  print(problematic_ids_mic)
+}
+
+# 4. Check for any IDs in zero_mutation_rows that don't have a corresponding non-zero mutation row
+ids_without_non_zero_mic <- setdiff(zero_mutation_rows_mic$ID, non_zero_mutation_rows_mic$ID)
+print("IDs with zero mutations but no corresponding non-zero mutation rows:")
+print(ids_without_non_zero_mic)
+
+# 5. Summary statistics
+print(paste("Number of unique IDs in zero mutation rows:", n_distinct(zero_mutation_rows_mic$ID)))
+print(paste("Number of unique IDs in non-zero mutation rows:", n_distinct(non_zero_mutation_rows_mic$ID)))
+
+# 6. Distribution of mutation counts for non-zero mutation rows
+mutation_distribution_mic <- non_zero_mutation_rows_mic %>%
+  group_by(mutations) %>%
+  summarise(count = n()) %>%
+  arrange(mutations)
+
+print("Distribution of mutation counts:")
+print(mutation_distribution_mic)
+
+# 7. Check for any unexpected mutation values
+unexpected_mutations_mic <- dropout_mutants15_GOF_mic %>%
+  filter(mutations < 0 | mutations > 5)  # Adjust the upper bound as needed
+
+if (nrow(unexpected_mutations_mic) > 0) {
+  print("Rows with unexpected mutation values:")
+  print(unexpected_mutations_mic)
+} else {
+  print("No unexpected mutation values found.")
+}
+```
+
+Remove unique perfect IDs if there is no corresponding mutants:
+```{r class.output="goodCode"}
+# Step 1: Identify IDs with zero mutations
+zero_mutation_ids_mic <- dropout_mutants15_GOF_mic %>%
+  filter(mutations == 0 & fitD07D03 < -1.0) %>%
+  pull(ID)
+
+# Step 2: Identify IDs with non-zero mutations
+non_zero_mutation_ids_mic <- dropout_mutants15_GOF_mic %>%
+  filter(mutations != 0 & fitD07D03 > -1.0) %>%
+  pull(ID)
+
+# Step 3: Find IDs that have zero mutations but no corresponding non-zero mutation rows
+ids_to_remove_mic <- setdiff(zero_mutation_ids_mic, non_zero_mutation_ids_mic)
+
+# Step 4: Remove the rows with these IDs
+dropout_mutants15_GOF_mic_cleaned <- dropout_mutants15_GOF_mic %>%
+  filter(!(ID %in% ids_to_remove_mic))
+
+# Print summary
+print(paste("Number of rows before cleaning:", nrow(dropout_mutants15_GOF_mic)))
+print(paste("Number of rows after cleaning:", nrow(dropout_mutants15_GOF_mic_cleaned)))
+print(paste("Number of rows removed:", nrow(dropout_mutants15_GOF_mic) - nrow(dropout_mutants15_GOF_mic_cleaned)))
+print(paste("Number of unique IDs removed:", length(ids_to_remove_mic)))
+
+# Optionally, you can print the removed IDs
+print("IDs removed:")
+print(ids_to_remove_mic)
+
+# Assign the cleaned data back to dropout_mutants15_GOF if you want to update the original variable
+dropout_mutants15_GOF_mic <- dropout_mutants15_GOF_mic_cleaned
+```
+
+### Dropout Mutants
+Summarize the number of perfects and mutants at each AA distance after filtering:
+```{r class.output="goodCode"}
+# Create a function to count unique mutIDs for a given number of mutations
+dropout_mutants15_GOF_count_mic <- function(data, mutation_count) {
+  length(unique(subset(data, mutations == mutation_count)$mutID))
+}
+
+# Create a vector of counts for mutations 1-5
+dropout15_counts_mic <- sapply(1:5, function(x) dropout_mutants15_GOF_count_mic(dropout_mutants15_GOF_mic, x))
+
+# Count perfects separately
+perfects_count_mic <- length(unique(subset(dropout_mutants15_GOF_mic, mutations == 0 & fitD07D03 < -1.0)$mutID))
+
+# Create a data frame with the results, including the summary row
+dropout_mutants15_GOF_table_mic <- data.frame(
+  Mutations = c("Perfects (fit < -1.0)", "1 Mutation", "2 Mutations", "3 Mutations", "4 Mutations", "5 Mutations", "Total Mutations"),
+  Count = c(perfects_count_mic, dropout15_counts_mic, sum(dropout15_counts_mic))
+)
+
+# Print the table
+print(dropout_mutants15_GOF_table_mic)
+```
+
+```{r echo=FALSE}
+# Save as .csv for use in other RMD files:
+write.csv(dropout_mutants15_GOF_mic, 'GOF/OUTPUT/MIC/Lib15.D07D03.gof.1numprunedBCs.5AA.muts.fitness-1.csv',
+          row.names = FALSE, quote=FALSE)
+```
+
+### GOF Fitness
+
+**GOF Fitness:** Separate the `dropout_mutants15_GOF_mic` dataset into two new dataframes, where DF1 contains perfects and DF2 contains mutants:
+```{r}
+# Create a dataframe with mutations == 0
+dropout_mutants15_GOF_no_mutations_mic <- dropout_mutants15_GOF_mic[dropout_mutants15_GOF_mic$mutations == 0, ]
+
+# Create a dataframe with mutations != 0
+dropout_mutants15_GOF_with_mutations_mic <- dropout_mutants15_GOF_mic[dropout_mutants15_GOF_mic$mutations != 0, ]
+```
+
+Now, re-combine these dataframes to retain only the mutants
+```{r class.output="goodCode"}
+# Step 1: Prepare the reference dataframe
+df_reference_mic <- dropout_mutants15_GOF_no_mutations_mic %>%
+  select(ID, fitD07D03) %>%
+  rename(reference_fitD07D03 = fitD07D03)
+
+# Step 2: Join and calculate the difference
+dropout_mutants15_GOF_fitness_mic <- dropout_mutants15_GOF_with_mutations_mic %>%
+  left_join(df_reference_mic, by = "ID") %>%
+  mutate(fitD07D03 = fitD07D03 - reference_fitD07D03) %>%
+  select(ID, mutID, mutations, fitD07D03)
+
+# Print summary statistics
+print(paste("Number of Mutants:", nrow(dropout_mutants15_GOF_fitness_mic)))
+print(paste("Unique IDs:", length(unique(dropout_mutants15_GOF_fitness_mic$ID))))
+print(paste("Range of fitD07D03:", 
+            paste(round(range(dropout_mutants15_GOF_fitness_mic$fitD07D03, na.rm = TRUE), 1), collapse = " to ")))
+```
+
+**Boxplot:** Plot mutant fitness relative to parent variant by number of mutations:
+```{r}
+GOF_muts_fitness_by_muts_plot_mic <- ggplot(dropout_mutants15_GOF_fitness_mic, 
+                                        aes(x = factor(mutations), y = fitD07D03)) +
+  geom_boxplot() +
+  labs(title = "fitD07D03 by Number of Mutations", x = "Number of Mutations", y = "fitD07D03")
+
+print(GOF_muts_fitness_by_muts_plot_mic)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/MIC/GOF.MIC.Mutant.Fitness.png", 
+       plot =GOF_muts_fitness_by_muts_plot_mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+**Histogram of Mutant Fitness:** Clearly shows mutant fitness is normally distributed.
+```{r}
+GOF_muts_fitness_dist_plot_mic <- ggplot(dropout_mutants15_GOF_fitness_mic, aes(x = fitD07D03)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black") +
+  labs(title = "Distribution of fitD07D03", x = "fitD07D03", y = "Count")
+
+print(GOF_muts_fitness_dist_plot_mic)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/MIC/GOF.MIC.Mutant.Fitness.Distribution.png", 
+       plot =GOF_muts_fitness_dist_plot_mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+### GOF Alignment
+
+**FASTA:** Generate a FASTA file from the filtered `dropout_mutants15_GoF` perfects dataset for GoF analysis:
+```{r}
+# First, let's ensure we have the correct unique IDs for mutations == 1
+dropout_mutants15_GOF_mic_1mut_unique_ids <- dropout_mutants15_GOF_fitness_mic %>%
+  filter(mutations == 1) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Now, let's use these IDs to filter the dropout_mutants15_GOF dataset
+dropout_mutants15_GOF_mic_1mut_unique_id_seq <- dropout_mutants15_GOF_mic %>%
+  filter(ID %in% dropout_mutants15_GOF_mic_1mut_unique_ids & mutations == 0) %>%
+  select(ID, seq)
+
+# Create the sequences in FASTA format
+dropout_mutants15_GOF_mic_fasta_content <- paste(">", dropout_mutants15_GOF_mic_1mut_unique_id_seq$ID, "\n", dropout_mutants15_GOF_mic_1mut_unique_id_seq$seq, "\n", sep = "", collapse = "")
+
+# Define the file path in the working directory
+dropout_mutants15_GOF_mic_fasta_file_path <- file.path(getwd(), "GOF/MSA_Dropouts/MIC/FASTA/Lib15.GoF.perfects.mic.fasta")
+
+# Write the FASTA content to the file (57 unique IDs)
+writeLines(dropout_mutants15_GOF_mic_fasta_content, 
+           con = dropout_mutants15_GOF_mic_fasta_file_path)
+```
+
+**Alignment:** Use the `clustalo` executable to align the protein sequences associated with the dropout perfects. This will align the FASTA file: **Lib15.GoF.perfects.complementation.fasta** for use in GoF analysis.
+```{bash}
+./Scripts/clustalo -i GOF/MSA_Dropouts/MIC/FASTA/Lib15.GoF.perfects.mic.fasta -o GOF/MSA_Dropouts/MIC/FASTA/Lib15.GoF.perfects.mic.tree.aligned.mod.aln --outfmt=clustal --force
+```
+
+**Mapping Residues:** Use the following `map.aligned.residues.py` python script to generate csv files for each designed homolog that maps residue positions of each A.A. from the alignment FASTA:
+```{python}
+import time
+import csv
+
+##################################
+#INPUTS:
+
+base_path = ""
+trees_path_prefix = base_path+""
+
+#clustal format alignment file
+align_file_in = [trees_path_prefix+"GOF/MSA_Dropouts/MIC/FASTA/Lib15.GoF.perfects.mic.tree.aligned.mod.aln"]
+
+#number of seqs in each alignment file
+num_samples_in_file = [58] #New FASTA w/ mutant fit > -1 (+1 from actual file count)
+
+##################################
+#OUTPUTS:
+
+msa_map_out_path = [trees_path_prefix+"GOF/MSA_Dropouts/MIC/"]
+
+# Loop to generate .csv files for each ID
+for alni in range(1):#len(align_file_in)):
+    #print(alni)
+    
+    ##################################
+    #VARIABLES:
+    
+    #ID as key, align as value
+    align_dict = dict()
+    
+    #num_samples = 419
+    num_samples = num_samples_in_file[alni]
+    
+    #pos key, consensus pos val
+    IDaadictlist = [dict() for x in range(num_samples)]
+    
+    IDtoindexdict = dict()
+    indexdtoIDict = dict()
+    
+    ##################################
+    #CODE:
+    
+    line_count = 0
+    #loop over all alignments:
+    print(align_file_in[alni])
+    for line in open(align_file_in[alni]):
+        #skip header
+        if line_count > 1:
+            listWords = line.split('    ')
+            ID = listWords[0]
+            align = line[16:].rstrip()
+            if ID.strip() != "":
+                align_dict[ID] = align_dict.get(ID, "") + align.replace(" ", "")
+        line_count += 1
+    
+    #print("NP_414590")
+    #print(align_dict["NP_414590"])
+
+    counter = 0
+    for ID in align_dict:
+        #print(ID)
+        #print(align_dict[ID])
+        IDtoindexdict[ID] = counter
+        indexdtoIDict[counter]=ID
+        align = align_dict[ID]
+        
+        aacounter = 1
+        
+        
+        for i in range(len(align)):
+            if align[i] != "-":
+                
+                #print(str(counter)+" "+str(aacounter))
+                IDaadictlist[counter][aacounter]=i+1
+                aacounter += 1
+        counter += 1
+        
+    #print(len(IDaadictlist))
+    for i in range(len(IDaadictlist)-1):
+        #print(indexdtoIDict[i])
+        #print(i)
+        #print(alni)
+        #print(indexdtoIDict[i])
+        csvfile = open(str(msa_map_out_path[alni]+indexdtoIDict[i]+".csv"), 'w')
+        fieldnames = ['orth_aanum','msa_aanum']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for j in IDaadictlist[i]:
+            #print(str(j)+" "+str(IDaadictlist[i][j]))
+            #save all data:
+            writer.writerow({'orth_aanum':str(j),'msa_aanum':str(IDaadictlist[i][j])})
+        csvfile.close()
+```
+
+### GOF Plots
+
+Find GoF Perfects for Dropouts
+```{r}
+# Create a data frame of unique IDs
+mutants15_to_plot_mic <- dropout_mutants15_GOF_fitness_mic %>%
+  filter(mutations == 1) %>%
+  distinct(ID) %>%
+  select(ID)
+```
+
+```{r class.output="goodCode"}
+# Initialize an empty vector to store IDs of mutants to be removed
+mutants_to_remove_mic <- character()
+
+# Check for missing MSA files
+for (i in 1:nrow(mutants15_to_plot_mic)) {
+  mutant15_current_temp <- mutants15_to_plot_mic$ID[i]
+  if (!file.exists(paste("GOF/MSA_Dropouts/MIC/", mutant15_current_temp, ".csv", sep = ""))) {
+    mutants_to_remove_mic <- c(mutants_to_remove_mic, mutant15_current_temp)
+  }
+}
+
+# Output the results
+if (length(mutants_to_remove_mic) > 0) {
+  cat("The following mutants will be removed due to missing MSA files:\n")
+  print(mutants_to_remove_mic)
+  cat("\nTotal number of mutants to be removed:", length(mutants_to_remove_mic), "\n")
+  
+  # Remove the mutants without MSA files
+  mutants15_to_plot_mic <- mutants15_to_plot_mic[!mutants15_to_plot_mic$ID %in% mutants_to_remove_mic, ]
+  cat("\nMutants remaining:", nrow(mutants15_to_plot_mic), "\n")
+} else {
+  cat("All mutants have corresponding MSA files. No mutants will be removed.\n")
+}
+
+# If you want to see the remaining mutants
+print(mutants15_to_plot_mic)
+```
+
+Read in the E. coli map:
+```{r}
+ecoli_map <- read.csv(file=paste("GOF/MSA_Dropouts/Comp/NP_414590.csv", sep=""), head=TRUE, sep=",")
+```
+
+Make a new data frame which will keep all info
+```{r}
+GOF_fitness_map_mic <- data.frame(position=numeric(),
+                              aa=character(),
+                              mutations=numeric(),
+                              fitness=numeric(),
+                              posortho=numeric(),
+                              ingap=character(),
+                              mutID=character(),
+                              ID=character())
+
+aminoacids <- data.frame(aa=c('G','P','A','V','L','I','M','C','F','Y','W','H','K','R','Q','N','E','D','S','T','X'),
+                         aanum=c(1:21))
+```
+
+**MSA Mapping:** Map the mutants (fitness difference from perfects > 0) over all perfects (fit < -1) for GOF analysis:
+```{r class.output="goodCode"}
+#loop over all perfects
+for (iii in 1:nrow(mutants15_to_plot_mic)){
+  
+  #current ortholog:
+  mutant_current_mic <- as.character(mutants15_to_plot_mic$ID[iii])
+  
+  #length of name
+  name_size_mic = nchar(paste(mutant_current_mic,"_",sep=""))
+  
+  #get the MSA mapping
+  mutant_map_mic <- read.csv(file=paste("GOF/MSA_Dropouts/MIC/",mutant_current_mic,".csv",sep=""),head=TRUE,sep=",")
+  
+  #grab the mutants with a fitness increase (GoF) greater than zero (do not include perfects from dataset)
+  GOFmutIDinfo_temp_mic <- dropout_mutants15_GOF_fitness_mic %>%
+    filter(ID == mutant_current_mic) %>%
+    filter(mutations != 0) %>%
+    filter(fitD07D03 >= 0.5) ###CHANGE VALUE AS NEEDED (>= 0.5 is default)
+  
+  # Check if GOFmutIDinfo_temp is empty
+  if(nrow(GOFmutIDinfo_temp_mic) == 0) {
+    warning(paste("No non-zero mutation data found for ID:", mutant_current_mic))
+    next  # Skip to the next iteration of the outer loop
+  }
+  
+  #loop over all mutants for this construct:
+  for (mn in 1:nrow(GOFmutIDinfo_temp_mic)) {
+    
+    #this mutants fitness
+    gof_fit_temp_mic <- GOFmutIDinfo_temp_mic$fitD07D03[mn]  # or whichever fitness column you're using
+    
+    #grab the mut name
+    mutations_names_mic <- as.character(GOFmutIDinfo_temp_mic$mutID[mn])
+    
+    #grab only the relevant portion of the name
+    mutations_names_mic <- substr(mutations_names_mic, name_size+1, nchar(mutations_names_mic))
+    
+    ## split mutation string at non-digits
+    s <- strsplit(mutations_names_mic, "_")
+    
+    for (mutnum in 1:GOFmutIDinfo_temp_mic$mutations[mn]){
+      
+      #grab the corresponding mutation string
+      mutcurr<-s[[1]][mutnum]
+      
+      #get the position
+      mutpos <- as.numeric(str_extract(mutcurr, "[0-9]+"))
+      
+      #get ending aa
+      to_aa <- substr(mutcurr, nchar(mutpos)+2, nchar(mutcurr))
+      
+      #find the number in the consensus seq
+      gof_cons_aanum_index <- which(mutant_map_mic$orth_aanum == mutpos)
+      
+      if (length(gof_cons_aanum_index) > 0) {
+        gof_cons_aanum <- mutant_map_mic$msa_aanum[gof_cons_aanum_index]
+        
+        #does this map to a non-gap
+        if (gof_cons_aanum %in% ecoli_map$msa_aanum){
+          
+          #the corresponding e.coli residue
+          e_coli_residue <- ecoli_map$orth_aanum[which(ecoli_map$msa_aanum == gof_cons_aanum)]
+          
+          #add this point to the data
+          GOF_fitness_map_mic <- rbind(GOF_fitness_map_mic,
+                                   data.frame(position=e_coli_residue,
+                                              aa=to_aa,
+                                              mutations=GOFmutIDinfo_temp_mic$mutations[mn],
+                                              fitness=gof_fit_temp_mic,
+                                              posortho=mutpos,
+                                              ingap="No",
+                                              mutID=GOFmutIDinfo_temp_mic$mutID[mn],
+                                              ID=GOFmutIDinfo_temp_mic$ID[mn]))
+          
+        } else {
+          #if it's here it maps to a gap
+          
+          #add this point to the data
+          GOF_fitness_map_mic <- rbind(GOF_fitness_map_mic,
+                                   data.frame(position=-1,
+                                              aa=to_aa,
+                                              mutations=GOFmutIDinfo_temp_mic$mutations[mn],
+                                              fitness=gof_fit_temp_mic,
+                                              posortho=mutpos,
+                                              ingap="Yes",
+                                              mutID=GOFmutIDinfo_temp_mic$mutID[mn],
+                                              ID=GOFmutIDinfo_temp_mic$ID[mn]))
+          
+        }
+      } else {
+        warning(paste("No matching orth_aanum found for mutpos:", mutpos, "in ID:", mutant_current_mic))
+        # You might want to handle this case, perhaps by skipping this mutation or adding it to a separate list for review
+      }
+    }
+  }
+}
+```
+
+```{r echo=FALSE}
+write.table(GOF_fitness_map_mic, file = "GOF/OUTPUT/MIC/GOF_Fitness_Map_MIC.csv", 
+            sep = ",", row.names = F,quote=F,col.names = T)
+```
+
+Collapse the GOF fitness values by aa position along the protein sequence:
+```{r}
+GOF_fitness_collapsed_by_pos_mic <- GOF_fitness_map_mic %>%
+  filter(position > 0) %>%
+  group_by(position) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness),
+            numortho=length(unique(ID)))
+```
+
+#### GOF Mutant No. Plot
+
+Plot the number of gain-of-function mutants recovered for each aa position along the protein sequence and include cutoff lines for 1 SD above the mean number of GOF mutants and 2 SD above the mean number of GOF mutants. All positions with GOF mutants above the 2 SD line are considered significant positions positively influencing the parent variants ability to complement metabolic function in the E. coli knockout model.
+```{r class.output="goodCode"}
+GoF_plot_mic <- ggplot(GOF_fitness_collapsed_by_pos_mic, aes(x=position, y=numpoints, color=numortho)) +
+  geom_segment(aes(x = 0, y = mean(numpoints)+2*sd(numpoints), 
+                   xend = 160, 
+                   yend = mean(numpoints)+2*sd(numpoints)),linetype=2,colour = "blue")+
+  geom_segment(aes(x = 0, y = mean(numpoints), xend = 160, yend = mean(numpoints)),linetype=2,colour = "red")+
+  geom_point(size=1.8)+
+  labs(x = "Position (aa)", y ="Number of gain-of-function mutants",color="") +
+  scale_color_gradient(low = "blue", 
+                       high = "red",
+                       name="Num.\nUniq.\nHomo.",
+                       na.value="grey", 
+                       limit = c(0,1.1*max(GOF_fitness_collapsed_by_pos_mic$numortho))) +
+  scale_x_continuous(breaks=seq(0,160,20))+
+  theme(legend.position="left")
+GoF_plot_mic <- ggExtra::ggMarginal(GoF_plot_mic,type = "histogram",
+                    margins = "y",
+                    bins=21,
+                    col = 'black',
+                    fill = 'red')
+GoF_plot_mic
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/MIC/GOF.MIC.Mutant.by.AA.Pos.2sigma.png", 
+       plot = GoF_plot_mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+Print out a summary table of significant aa position along the protein sequence
+```{r class.output="goodCode"}
+GOF_fitness_collapsed_by_pos_2sigma_mic <- GOF_fitness_collapsed_by_pos_mic %>%
+  filter(numpoints >= (mean(GOF_fitness_collapsed_by_pos_mic$numpoints) + 2*sd(GOF_fitness_collapsed_by_pos_mic$numpoints)))
+print(GOF_fitness_collapsed_by_pos_2sigma_mic)
+```
+
+Calculate all Data and Stats:
+```{r}
+GOF_fitness_collapsed_all_mic <- GOF_fitness_map_mic %>%
+  filter(position > 0) %>%
+  group_by(position, aa) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness),
+            numortho=length(unique(ID)))
+
+gof_aa_dim <- nrow(aminoacids)
+gof_ref_len <- nrow(ecoli_map)
+```
+
+```{r warning=FALSE}
+#these matrices have the fitness/num/sd for each aa at each position:
+gof_matrix = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_num = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_sd = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_numortho = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+
+#populate matrix
+for (i in 1:nrow(GOF_fitness_collapsed_all_mic)){
+  
+  gof_matrix[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_mic$aa[i])),GOF_fitness_collapsed_all_mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_mic$fitval[i])
+  gof_matrix_num[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_mic$aa[i])),GOF_fitness_collapsed_all_mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_mic$numpoints[i])
+  gof_matrix_sd[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_mic$aa[i])),GOF_fitness_collapsed_all_mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_mic$stdfit[i])
+  gof_matrix_numortho[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_mic$aa[i])),GOF_fitness_collapsed_all_mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_mic$numortho[i])
+}
+
+rownames(gof_matrix)<-aminoacids$aa
+colnames(gof_matrix)<-c(1:gof_ref_len)
+rownames(gof_matrix_num)<-aminoacids$aa
+colnames(gof_matrix_num)<-c(1:gof_ref_len)
+rownames(gof_matrix_sd)<-aminoacids$aa
+colnames(gof_matrix_sd)<-c(1:gof_ref_len)
+rownames(gof_matrix_numortho)<-aminoacids$aa
+colnames(gof_matrix_numortho)<-c(1:gof_ref_len)
+
+gof_matrix_melt <- melt(gof_matrix)
+gof_matrix_num_melt <- melt(gof_matrix_num)
+gof_matrix_sd_melt <- melt(gof_matrix_sd)
+gof_matrix_numortho_melt <- melt(gof_matrix_numortho)
+
+# Rename columns to "X1" and "X2"
+names(gof_matrix_melt)[names(gof_matrix_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_num_melt)[names(gof_matrix_num_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_sd_melt)[names(gof_matrix_sd_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_numortho_melt)[names(gof_matrix_numortho_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+gof_matrix_melt_only_GOFpos <- gof_matrix_melt %>%
+  filter(X2 == 89 |
+         X2 == 102 |
+         X2 == 103 |
+         X2 == 121 |
+         X2 == 128 |
+         X2 == 129 )
+
+gof_matrix_melt_only_GOFpos$mutposnum <- 0
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==89)] <- 1
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==102)] <- 2
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==103)] <- 3
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==121)] <- 4
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==128)] <- 5
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==129)] <- 6
+
+gof_matrix_melt_only_GOFpos$aanum <- 0
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="A")] <- 12
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="C")] <- 10
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="D")] <- 5
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="E")] <- 4
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="F")] <- 19
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="G")] <- 11
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="H")] <- 3
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="I")] <- 15
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="K")] <- 1
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="L")] <- 14
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="M")] <- 16
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="N")] <- 6
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="P")] <- 17
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="Q")] <- 7
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="R")] <- 2
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="S")] <- 9
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="T")] <- 8
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="V")] <- 13
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="W")] <- 20
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="Y")] <- 18
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="X")] <- 21
+
+gof_matrix_melt_only_GOFpos_wnum <- gof_matrix_melt_only_GOFpos %>%
+  inner_join(gof_matrix_num_melt,by=c("X1","X2")) %>%
+  dplyr::rename(mutnum=value.y,value=value.x)
+```
+
+#### GOF Position Plot
+
+Plot the mean fitness of each GoF mutation at the significant positions, with the number of mutants observed at each AA:
+```{r}
+# Define the order of amino acids for the rectangles
+rect_order <- c("P", "Q", "F", "G", "Y", "E")
+
+# Create a data frame for the rectangles
+rect_data <- data.frame(
+aanum = match(rect_order, c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W","X")),
+xmin = seq(0.5, by = 1, length.out = length(rect_order)),
+xmax = seq(1.5, by = 1, length.out = length(rect_order)))
+
+#plot the data from all mutants:
+GOF_fit_nummut_plot_mic <- ggplot(gof_matrix_melt_only_GOFpos_wnum, 
+       aes(x=mutposnum, y=aanum,
+           fill=value,
+           label=mutnum)) +
+  geom_tile() +
+  geom_text() +
+  # Add black rectangles
+  geom_rect(data = rect_data,
+           aes(xmin = xmin, xmax = xmax, ymin = aanum - 0.5, ymax = aanum + 0.5),
+           fill = NA, color = "black", inherit.aes = FALSE) +
+  labs(x = "Position (aa)",
+       y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", 
+                      high = "red",
+                      name="Fitness",
+                      na.value="grey",
+                      limit = c(0, max(gof_matrix_melt_only_GOFpos_wnum$value))) +
+  theme_minimal()+
+  scale_x_continuous(name="Position (aa)",
+                     breaks=c(1,2,3,4,5,6),
+                     labels=c("89","102","103","121","128","129"))+
+  scale_y_continuous(name="Amino acid", 
+                     breaks=c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21),
+                     labels=c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W","X"))
+
+print(GOF_fit_nummut_plot_mic)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/MIC/GOF.MIC.Fitness.Number.Mutants.png", 
+       plot = GOF_fit_nummut_plot_mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+## 400x MIC (200 ug/mL TMP)
+
+### Dropout Perfects
+
+Retrieve all dropout perfects with a log-fold change value greater than -1.0 from the **COMPLEMENTATION** dataset. Then, retrieve the same perfects (ID) from the **400x MIC** dataset and retain only those with fitness less than -1. Also, retrieve all corresponding mutants. Use the `mut_collapse_15` dataset which includes 797 perfects (mutations = 0; numprunedBCs = 5).
+```{r}
+# Step 1: Identify IDs that have rows where mutations == 0 and fitD05D03 > -1.0 in COMPLEMENTATION
+dropout15_ids_with_zero_mutations_complement <- mut_collapse_15 %>%
+  filter(mutations == 0 & fitD05D03 > -1.0) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Step 2: Identify the same IDs that have mutations == 0 and fitD11D03 < -1.0 in 400x MIC
+dropout15_ids_with_zero_mutations_400mic <- mut_collapse_15 %>%
+  filter(ID %in% dropout15_ids_with_zero_mutations_complement & 
+         mutations == 0 & 
+         fitD11D03 < -1.0 &
+         !is.na(fitD11D03)) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Step 3: Retrieve the rows for these IDs
+result_rows_400mic <- mut_collapse_15 %>%
+  filter(ID %in% dropout15_ids_with_zero_mutations_400mic & mutations == 0)
+
+# Step 4: Filter the main dataset to keep mutants if they match a corresponding perfect ID
+dropout_mutants15_GOF_400mic <- mut_collapse_15 %>%
+  filter(
+    (mutations == 0 & !is.na(fitD05D03) & fitD05D03 > -1.0 & 
+     !is.na(fitD11D03) & fitD11D03 < -1.0) |
+    (mutations != 0 & fitD11D03 > -1.0 & ID %in% dropout15_ids_with_zero_mutations_400mic)) %>%
+  dplyr::select(ID, mutID, numprunedBCs, mutations, fitD05D03, fitD11D03, seq)
+```
+
+Validate that rows where mutations != 0 have an ID that matches rows where mutations == 0 and fitD05D03 < -1.0.
+```{r class.output="goodCode"}
+# Verification step
+verification_result_400mic <- dropout_mutants15_GOF_400mic %>%
+  filter(mutations == 0) %>%
+  mutate(
+    condition_met = fitD05D03 > -1.0 & fitD11D03 < -1,
+    fitD05D03_check = fitD05D03 > -1.0,
+    fitD11D03_check = fitD11D03 < -1
+  )
+
+# Check if all rows meet the condition
+all_conditions_met_400mic <- all(verification_result_400mic$condition_met)
+
+# Summary of the verification
+verification_summary_400mic <- verification_result_400mic %>%
+  summarise(
+    total_rows = n(),
+    rows_meeting_both_conditions = sum(condition_met),
+    rows_meeting_fitD05D03 = sum(fitD05D03_check),
+    rows_meeting_fitD11D03 = sum(fitD11D03_check)
+  )
+
+# Print results
+print("Verification Summary:")
+print(verification_summary_400mic)
+print(paste("All conditions met:", all_conditions_met_400mic))
+
+# If there are any rows not meeting the conditions, display them
+if (!all_conditions_met_400mic) {
+  print("Rows not meeting both conditions:")
+  print(verification_result_400mic %>% filter(!condition_met) %>% select(ID, fitD05D03, fitD11D03))
+}
+```
+
+Validate that rows where mutations != 0 have an ID that matches rows where mutations == 0 and fitD11D03 < -1.0.
+```{r class.output="goodCode"}
+# 1. First, create two subsets of the data
+zero_mutation_rows_400mic <- dropout_mutants15_GOF_400mic %>%
+  filter(mutations == 0 & fitD11D03 < -1.0)
+
+non_zero_mutation_rows_400mic <- dropout_mutants15_GOF_400mic %>%
+  filter(mutations != 0 & fitD11D03 > -1.0)
+
+# 2. Check that all IDs in non_zero_mutation_rows are present in zero_mutation_rows
+all_valid_ids_400mic <- all(non_zero_mutation_rows_400mic$ID %in% zero_mutation_rows_400mic$ID)
+print(paste("All non-zero mutation rows have a matching zero mutation row:", all_valid_ids_400mic))
+
+# 3. If the above is FALSE, find the problematic IDs
+if (!all_valid_ids_400mic) {
+  problematic_ids_400mic <- setdiff(non_zero_mutation_rows_400mic$ID, zero_mutation_rows_400mic$ID)
+  print("IDs with non-zero mutations but no matching zero mutation row:")
+  print(problematic_ids_400mic)
+}
+
+# 4. Check for any IDs in zero_mutation_rows that don't have a corresponding non-zero mutation row
+ids_without_non_zero_400mic <- setdiff(zero_mutation_rows_400mic$ID, non_zero_mutation_rows_400mic$ID)
+print("IDs with zero mutations but no corresponding non-zero mutation rows:")
+print(ids_without_non_zero_400mic)
+
+# 5. Summary statistics
+print(paste("Number of unique IDs in zero mutation rows:", n_distinct(zero_mutation_rows_400mic$ID)))
+print(paste("Number of unique IDs in non-zero mutation rows:", n_distinct(non_zero_mutation_rows_400mic$ID)))
+
+# 6. Distribution of mutation counts for non-zero mutation rows
+mutation_distribution_400mic <- non_zero_mutation_rows_400mic %>%
+  group_by(mutations) %>%
+  summarise(count = n()) %>%
+  arrange(mutations)
+
+print("Distribution of mutation counts:")
+print(mutation_distribution_400mic)
+
+# 7. Check for any unexpected mutation values
+unexpected_mutations_400mic <- dropout_mutants15_GOF_400mic %>%
+  filter(mutations < 0 | mutations > 5)  # Adjust the upper bound as needed
+
+if (nrow(unexpected_mutations_400mic) > 0) {
+  print("Rows with unexpected mutation values:")
+  print(unexpected_mutations_400mic)
+} else {
+  print("No unexpected mutation values found.")
+}
+```
+
+Remove unique perfect IDs if there is no corresponding mutants:
+```{r class.output="goodCode"}
+# Step 1: Identify IDs with zero mutations
+zero_mutation_ids_400mic <- dropout_mutants15_GOF_400mic %>%
+  filter(mutations == 0 & fitD11D03 < -1.0) %>%
+  pull(ID)
+
+# Step 2: Identify IDs with non-zero mutations
+non_zero_mutation_ids_400mic <- dropout_mutants15_GOF_400mic %>%
+  filter(mutations != 0 & fitD11D03 > -1.0) %>%
+  pull(ID)
+
+# Step 3: Find IDs that have zero mutations but no corresponding non-zero mutation rows
+ids_to_remove_400mic <- setdiff(zero_mutation_ids_400mic, non_zero_mutation_ids_400mic)
+
+# Step 4: Remove the rows with these IDs
+dropout_mutants15_GOF_400mic_cleaned <- dropout_mutants15_GOF_400mic %>%
+  filter(!(ID %in% ids_to_remove_400mic))
+
+# Print summary
+print(paste("Number of rows before cleaning:", nrow(dropout_mutants15_GOF_400mic)))
+print(paste("Number of rows after cleaning:", nrow(dropout_mutants15_GOF_400mic_cleaned)))
+print(paste("Number of rows removed:", nrow(dropout_mutants15_GOF_400mic) - nrow(dropout_mutants15_GOF_400mic_cleaned)))
+print(paste("Number of unique IDs removed:", length(ids_to_remove_400mic)))
+
+# Optionally, you can print the removed IDs
+print("IDs removed:")
+print(ids_to_remove_400mic)
+
+# Assign the cleaned data back to dropout_mutants15_GOF if you want to update the original variable
+dropout_mutants15_GOF_400mic <- dropout_mutants15_GOF_400mic_cleaned
+```
+
+### Dropout Mutants
+Summarize the number of perfects and mutants at each AA distance after filtering:
+```{r class.output="goodCode"}
+# Create a function to count unique mutIDs for a given number of mutations
+dropout_mutants15_GOF_count_400mic <- function(data, mutation_count) {
+  length(unique(subset(data, mutations == mutation_count)$mutID))
+}
+
+# Create a vector of counts for mutations 1-5
+dropout15_counts_400mic <- sapply(1:5, function(x) dropout_mutants15_GOF_count_400mic(dropout_mutants15_GOF_400mic, x))
+
+# Count perfects separately
+perfects_count_400mic <- length(unique(subset(dropout_mutants15_GOF_400mic, mutations == 0 & fitD11D03 < -1.0)$mutID))
+
+# Create a data frame with the results, including the summary row
+dropout_mutants15_GOF_table_400mic <- data.frame(
+  Mutations = c("Perfects (fit < -1.0)", "1 Mutation", "2 Mutations", "3 Mutations", "4 Mutations", "5 Mutations", "Total Mutations"),
+  Count = c(perfects_count_400mic, dropout15_counts_400mic, sum(dropout15_counts_400mic))
+)
+
+# Print the table
+print(dropout_mutants15_GOF_table_400mic)
+```
+
+```{r echo=FALSE}
+# Save as .csv for use in other RMD files:
+write.csv(dropout_mutants15_GOF_400mic, 'GOF/OUTPUT/400xMIC/Lib15.D11D03.gof.1numprunedBCs.5AA.muts.fitness-1.csv',
+          row.names = FALSE, quote=FALSE)
+```
+
+### GOF Fitness
+
+**GOF Fitness:** Separate the `dropout_mutants15_GOF_mic` dataset into two new dataframes, where DF1 contains perfects and DF2 contains mutants:
+```{r}
+# Create a dataframe with mutations == 0
+dropout_mutants15_GOF_no_mutations_400mic <- dropout_mutants15_GOF_400mic[dropout_mutants15_GOF_400mic$mutations == 0, ]
+
+# Create a dataframe with mutations != 0
+dropout_mutants15_GOF_with_mutations_400mic <- dropout_mutants15_GOF_400mic[dropout_mutants15_GOF_400mic$mutations != 0, ]
+```
+
+Now, re-combine these dataframes to retain only the mutants
+```{r class.output="goodCode"}
+# Step 1: Prepare the reference dataframe
+df_reference_400mic <- dropout_mutants15_GOF_no_mutations_400mic %>%
+  select(ID, fitD11D03) %>%
+  rename(reference_fitD11D03 = fitD11D03)
+
+# Step 2: Join and calculate the difference
+dropout_mutants15_GOF_fitness_400mic <- dropout_mutants15_GOF_with_mutations_400mic %>%
+  left_join(df_reference_400mic, by = "ID") %>%
+  mutate(fitD11D03 = fitD11D03 - reference_fitD11D03) %>%
+  select(ID, mutID, mutations, fitD11D03)
+
+# Print summary statistics
+print(paste("Number of Mutants:", nrow(dropout_mutants15_GOF_fitness_400mic)))
+print(paste("Unique IDs:", length(unique(dropout_mutants15_GOF_fitness_400mic$ID))))
+print(paste("Range of fitD11D03:", 
+            paste(round(range(dropout_mutants15_GOF_fitness_400mic$fitD11D03, na.rm = TRUE), 1), collapse = " to ")))
+```
+
+```{r class.output="goodCode"}
+# Count unique IDs with mutations == 0
+unique_ids_zero_mutations <- dropout_mutants15_GOF_fitness_400mic %>%
+  distinct(ID) %>%
+  nrow()
+
+print(paste("Number of unique IDs:", unique_ids_zero_mutations))
+```
+
+**Boxplot:** Plot mutant fitness relative to parent variant by number of mutations:
+```{r}
+GOF_muts_fitness_by_muts_plot_400mic <- ggplot(dropout_mutants15_GOF_fitness_400mic, 
+                                        aes(x = factor(mutations), y = fitD11D03)) +
+  geom_boxplot() +
+  labs(title = "fitD11D03 by Number of Mutations", x = "Number of Mutations", y = "fitD11D03")
+
+print(GOF_muts_fitness_by_muts_plot_400mic)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/400xMIC/GOF.400xMIC.Mutant.Fitness.by.Mutations.png", 
+       plot =GOF_muts_fitness_by_muts_plot_400mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+**Histogram of Mutant Fitness:** Clearly shows mutant fitness is normally distributed.
+```{r}
+GOF_muts_fitness_dist_plot_400mic <- ggplot(dropout_mutants15_GOF_fitness_400mic, aes(x = fitD11D03)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black") +
+  labs(title = "Distribution of fitD11D03", x = "fitD11D03", y = "Count")
+
+print(GOF_muts_fitness_dist_plot_400mic)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/400xMIC/GOF.400xMIC.Mutant.Fitness.Distribution.png", 
+       plot =GOF_muts_fitness_dist_plot_400mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+### GOF Alignment
+
+**FASTA:** Generate a FASTA file from the filtered `dropout_mutants15_GoF` perfects dataset for GoF analysis:
+```{r}
+# First, let's ensure we have the correct unique IDs for mutations == 1
+dropout_mutants15_GOF_400mic_1mut_unique_ids <- dropout_mutants15_GOF_fitness_400mic %>%
+  filter(mutations == 1) %>%
+  distinct(ID) %>%
+  pull(ID)
+
+# Now, let's use these IDs to filter the dropout_mutants15_GOF dataset
+dropout_mutants15_GOF_400mic_1mut_unique_id_seq <- dropout_mutants15_GOF_400mic %>%
+  filter(ID %in% dropout_mutants15_GOF_400mic_1mut_unique_ids & mutations == 0) %>%
+  select(ID, seq)
+
+# Create the sequences in FASTA format
+dropout_mutants15_GOF_400mic_fasta_content <- paste(">", dropout_mutants15_GOF_400mic_1mut_unique_id_seq$ID, "\n", dropout_mutants15_GOF_400mic_1mut_unique_id_seq$seq, "\n", sep = "", collapse = "")
+
+# Define the file path in the working directory
+dropout_mutants15_GOF_400mic_fasta_file_path <- file.path(getwd(), "GOF/MSA_Dropouts/400xMIC/FASTA/Lib15.GoF.perfects.400mic.fasta")
+
+# Write the FASTA content to the file (37 unique ID)
+writeLines(dropout_mutants15_GOF_400mic_fasta_content, 
+           con = dropout_mutants15_GOF_400mic_fasta_file_path)
+```
+
+**Alignment:** Use the `clustalo` executable to align the protein sequences associated with the dropout perfects. This will align the FASTA file: **Lib15.GoF.perfects.complementation.fasta** for use in GoF analysis.
+```{bash}
+./Scripts/clustalo -i GOF/MSA_Dropouts/400xMIC/FASTA/Lib15.GoF.perfects.400mic.fasta -o GOF/MSA_Dropouts/400xMIC/FASTA/Lib15.GoF.perfects.400mic.tree.aligned.mod.aln --outfmt=clustal --force
+```
+
+**Mapping Residues:** Use the following `map.aligned.residues.py` python script to generate csv files for each designed homolog that maps residue positions of each A.A. from the alignment FASTA:
+```{python}
+import time
+import csv
+
+##################################
+#INPUTS:
+
+base_path = ""
+trees_path_prefix = base_path+""
+
+#clustal format alignment file
+align_file_in = [trees_path_prefix+"GOF/MSA_Dropouts/400xMIC/FASTA/Lib15.GoF.perfects.400mic.tree.aligned.mod.aln"]
+
+#number of seqs in each alignment file
+num_samples_in_file = [38] #New FASTA w/ mutant fit > -1 (+1 from actual file count)
+
+##################################
+#OUTPUTS:
+
+msa_map_out_path = [trees_path_prefix+"GOF/MSA_Dropouts/400xMIC/"]
+
+# Loop to generate .csv files for each ID
+for alni in range(1):#len(align_file_in)):
+    #print(alni)
+    
+    ##################################
+    #VARIABLES:
+    
+    #ID as key, align as value
+    align_dict = dict()
+    
+    #num_samples
+    num_samples = num_samples_in_file[alni]
+    
+    #pos key, consensus pos val
+    IDaadictlist = [dict() for x in range(num_samples)]
+    
+    IDtoindexdict = dict()
+    indexdtoIDict = dict()
+    
+    ##################################
+    #CODE:
+    
+    line_count = 0
+    #loop over all alignments:
+    print(align_file_in[alni])
+    for line in open(align_file_in[alni]):
+        #skip header
+        if line_count > 1:
+            listWords = line.split('    ')
+            ID = listWords[0]
+            align = line[16:].rstrip()
+            if ID.strip() != "":
+                align_dict[ID] = align_dict.get(ID, "") + align.replace(" ", "")
+        line_count += 1
+    
+    #print("NP_414590")
+    #print(align_dict["NP_414590"])
+
+    counter = 0
+    for ID in align_dict:
+        #print(ID)
+        #print(align_dict[ID])
+        IDtoindexdict[ID] = counter
+        indexdtoIDict[counter]=ID
+        align = align_dict[ID]
+        
+        aacounter = 1
+        
+        
+        for i in range(len(align)):
+            if align[i] != "-":
+                
+                #print(str(counter)+" "+str(aacounter))
+                IDaadictlist[counter][aacounter]=i+1
+                aacounter += 1
+        counter += 1
+        
+    #print(len(IDaadictlist))
+    for i in range(len(IDaadictlist)-1):
+        #print(indexdtoIDict[i])
+        #print(i)
+        #print(alni)
+        #print(indexdtoIDict[i])
+        csvfile = open(str(msa_map_out_path[alni]+indexdtoIDict[i]+".csv"), 'w')
+        fieldnames = ['orth_aanum','msa_aanum']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for j in IDaadictlist[i]:
+            #print(str(j)+" "+str(IDaadictlist[i][j]))
+            #save all data:
+            writer.writerow({'orth_aanum':str(j),'msa_aanum':str(IDaadictlist[i][j])})
+        csvfile.close()
+```
+
+### GOF Plots
+
+Find GoF Perfects for Dropouts
+```{r}
+# Create a data frame of unique IDs
+mutants15_to_plot_400mic <- dropout_mutants15_GOF_fitness_400mic %>%
+  filter(mutations == 1) %>%
+  distinct(ID) %>%
+  select(ID)
+```
+
+```{r class.output="goodCode"}
+# Initialize an empty vector to store IDs of mutants to be removed
+mutants_to_remove_400mic <- character()
+
+# Check for missing MSA files
+for (i in 1:nrow(mutants15_to_plot_400mic)) {
+  mutant15_current_temp <- mutants15_to_plot_400mic$ID[i]
+  if (!file.exists(paste("GOF/MSA_Dropouts/400xMIC/", mutant15_current_temp, ".csv", sep = ""))) {
+    mutants_to_remove_400mic <- c(mutants_to_remove_400mic, mutant15_current_temp)
+  }
+}
+
+# Output the results
+if (length(mutants_to_remove_400mic) > 0) {
+  cat("The following mutants will be removed due to missing MSA files:\n")
+  print(mutants_to_remove_400mic)
+  cat("\nTotal number of mutants to be removed:", length(mutants_to_remove_400mic), "\n")
+  
+  # Remove the mutants without MSA files
+  mutants15_to_plot_400mic <- mutants15_to_plot_400mic[!mutants15_to_plot_400mic$ID %in% mutants_to_remove_400mic, ]
+  cat("\nMutants remaining:", nrow(mutants15_to_plot_400mic), "\n")
+} else {
+  cat("All mutants have corresponding MSA files. No mutants will be removed.\n")
+}
+
+# If you want to see the remaining mutants
+print(mutants15_to_plot_400mic)
+```
+
+Read in the E. coli map:
+```{r}
+ecoli_map <- read.csv(file=paste("GOF/MSA_Dropouts/Comp/NP_414590.csv", sep=""), 
+                      head=TRUE, sep=",")
+```
+
+Make a new data frame which will keep all info
+```{r}
+GOF_fitness_map_400mic <- data.frame(position=numeric(),
+                              aa=character(),
+                              mutations=numeric(),
+                              fitness=numeric(),
+                              posortho=numeric(),
+                              ingap=character(),
+                              mutID=character(),
+                              ID=character())
+
+aminoacids <- data.frame(aa=c('G','P','A','V','L','I','M','C','F','Y','W','H','K','R','Q','N','E','D','S','T','X'),
+                         aanum=c(1:21))
+```
+
+**MSA Mapping:** Map the mutants (fitness difference from perfects > 0) over all perfects (fit < -1) for GOF analysis:
+```{r}
+#loop over all perfects
+for (iii in 1:nrow(mutants15_to_plot_400mic)){
+  
+  #current ortholog:
+  mutant_current_400mic <- as.character(mutants15_to_plot_400mic$ID[iii])
+  
+  #length of name
+  name_size_400mic = nchar(paste(mutant_current_400mic,"_",sep=""))
+  
+  #get the MSA mapping
+  mutant_map_400mic <- read.csv(file=paste("GOF/MSA_Dropouts/400xMIC/",mutant_current_400mic,".csv",sep=""),head=TRUE,sep=",")
+  
+  #grab the mutants with a fitness increase (GoF) greater than zero (do not include perfects from dataset)
+  GOFmutIDinfo_temp_400mic <- dropout_mutants15_GOF_fitness_400mic %>%
+    filter(ID == mutant_current_400mic) %>%
+    filter(mutations != 0) %>%
+    filter(fitD11D03 >= 0.5) ###CHANGE VALUE AS NEEDED (default = 0.5)
+  
+  # Check if GOFmutIDinfo_temp is empty
+  if(nrow(GOFmutIDinfo_temp_400mic) == 0) {
+    warning(paste("No non-zero mutation data found for ID:", mutant_current_400mic))
+    next  # Skip to the next iteration of the outer loop
+  }
+  
+  #loop over all mutants for this construct:
+  for (mn in 1:nrow(GOFmutIDinfo_temp_400mic)) {
+    
+    #this mutants fitness
+    gof_fit_temp_400mic <- GOFmutIDinfo_temp_400mic$fitD11D03[mn]  # or whichever fitness column you're using
+    
+    #grab the mut name
+    mutations_names_400mic <- as.character(GOFmutIDinfo_temp_400mic$mutID[mn])
+    
+    #grab only the relevant portion of the name
+    mutations_names_400mic <- substr(mutations_names_400mic, name_size+1, nchar(mutations_names_400mic))
+    
+    ## split mutation string at non-digits
+    s <- strsplit(mutations_names_400mic, "_")
+    
+    for (mutnum in 1:GOFmutIDinfo_temp_400mic$mutations[mn]){
+      
+      #grab the corresponding mutation string
+      mutcurr<-s[[1]][mutnum]
+      
+      #get the position
+      mutpos <- as.numeric(str_extract(mutcurr, "[0-9]+"))
+      
+      #get ending aa
+      to_aa <- substr(mutcurr, nchar(mutpos)+2, nchar(mutcurr))
+      
+      #find the number in the consensus seq
+      gof_cons_aanum_index <- which(mutant_map_400mic$orth_aanum == mutpos)
+      
+      if (length(gof_cons_aanum_index) > 0) {
+        gof_cons_aanum <- mutant_map_400mic$msa_aanum[gof_cons_aanum_index]
+        
+        #does this map to a non-gap
+        if (gof_cons_aanum %in% ecoli_map$msa_aanum){
+          
+          #the corresponding e.coli residue
+          e_coli_residue <- ecoli_map$orth_aanum[which(ecoli_map$msa_aanum == gof_cons_aanum)]
+          
+          #add this point to the data
+          GOF_fitness_map_400mic <- rbind(GOF_fitness_map_400mic,
+                                   data.frame(position=e_coli_residue,
+                                              aa=to_aa,
+                                              mutations=GOFmutIDinfo_temp_400mic$mutations[mn],
+                                              fitness=gof_fit_temp_400mic,
+                                              posortho=mutpos,
+                                              ingap="No",
+                                              mutID=GOFmutIDinfo_temp_400mic$mutID[mn],
+                                              ID=GOFmutIDinfo_temp_400mic$ID[mn]))
+          
+        } else {
+          #if it's here it maps to a gap
+          
+          #add this point to the data
+          GOF_fitness_map_400mic <- rbind(GOF_fitness_map_400mic,
+                                   data.frame(position=-1,
+                                              aa=to_aa,
+                                              mutations=GOFmutIDinfo_temp_400mic$mutations[mn],
+                                              fitness=gof_fit_temp_400mic,
+                                              posortho=mutpos,
+                                              ingap="Yes",
+                                              mutID=GOFmutIDinfo_temp_400mic$mutID[mn],
+                                              ID=GOFmutIDinfo_temp_400mic$ID[mn]))
+          
+        }
+      } else {
+        warning(paste("No matching orth_aanum found for mutpos:", mutpos, "in ID:", mutant_current_400mic))
+        # You might want to handle this case, perhaps by skipping this mutation or adding it to a separate list for review
+      }
+    }
+  }
+}
+```
+
+```{r echo=FALSE}
+write.table(GOF_fitness_map_400mic, 
+            file = "GOF/OUTPUT/400xMIC/GOF_Fitness_Map_400mic.csv", 
+            sep = ",", row.names = F,quote=F,col.names = T)
+```
+
+Collapse the GOF fitness values by aa position along the protein sequence:
+```{r}
+GOF_fitness_collapsed_by_pos_400mic <- GOF_fitness_map_400mic %>%
+  filter(position > 0) %>%
+  group_by(position) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness),
+            numortho=length(unique(ID)))
+```
+
+#### GOF Mutant No. Plot
+
+Plot the number of gain-of-function mutants recovered for each aa position along the protein sequence and include cutoff lines for 1 SD above the mean number of GOF mutants and 2 SD above the mean number of GOF mutants. All positions with GOF mutants above the 2 SD line are considered significant positions positively influencing the parent variants ability to complement metabolic function in the E. coli knockout model.
+```{r class.output="goodCode"}
+GoF_plot_400mic <- ggplot(GOF_fitness_collapsed_by_pos_400mic, aes(x=position, y=numpoints, color=numortho)) +
+  geom_segment(aes(x = 0, y = mean(numpoints)+2*sd(numpoints), 
+                   xend = 160, 
+                   yend = mean(numpoints)+2*sd(numpoints)),linetype=2,colour = "blue")+
+  geom_segment(aes(x = 0, y = mean(numpoints), xend = 160, yend = mean(numpoints)),linetype=2,colour = "red")+
+  geom_point(size=1.8)+
+  labs(x = "Position (aa)", y ="Number of gain-of-function mutants",color="") +
+  scale_color_gradient(low = "blue", 
+                       high = "red",
+                       name="Num.\nUniq.\nHomo.",
+                       na.value="grey", 
+                       limit = c(0,1.1*max(GOF_fitness_collapsed_by_pos_400mic$numortho))) +
+  scale_x_continuous(breaks=seq(0,160,20))+
+  theme(legend.position="left")
+GoF_plot_400mic <- ggExtra::ggMarginal(GoF_plot_400mic,type = "histogram",
+                    margins = "y",
+                    bins=21,
+                    col = 'black',
+                    fill = 'red')
+GoF_plot_400mic
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/400xMIC/GOF.400xMIC.Mutant.by.AA.Pos.2sigma.png", 
+       plot = GoF_plot_400mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+Print out a summary table of significant aa position along the protein sequence
+```{r class.output="goodCode"}
+GOF_fitness_collapsed_by_pos_2sigma_400mic <- GOF_fitness_collapsed_by_pos_400mic %>%
+  filter(numpoints >= (mean(GOF_fitness_collapsed_by_pos_400mic$numpoints) +
+                         2*sd(GOF_fitness_collapsed_by_pos_400mic$numpoints)))
+
+print(GOF_fitness_collapsed_by_pos_2sigma_400mic)
+```
+
+Calculate all Data and Stats:
+```{r}
+GOF_fitness_collapsed_all_400mic <- GOF_fitness_map_400mic %>%
+  filter(position > 0) %>%
+  group_by(position, aa) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness),
+            numortho=length(unique(ID)))
+
+gof_aa_dim <- nrow(aminoacids)
+gof_ref_len <- nrow(ecoli_map)
+```
+
+```{r warning=FALSE}
+#these matrices have the fitness/num/sd for each aa at each position:
+gof_matrix = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_num = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_sd = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+gof_matrix_numortho = matrix(rep(NA, gof_ref_len*gof_aa_dim),nrow=gof_aa_dim,ncol=gof_ref_len)
+
+#populate matrix
+for (i in 1:nrow(GOF_fitness_collapsed_all_400mic)){
+  
+  gof_matrix[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_400mic$aa[i])),GOF_fitness_collapsed_all_400mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_400mic$fitval[i])
+  gof_matrix_num[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_400mic$aa[i])),GOF_fitness_collapsed_all_400mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_400mic$numpoints[i])
+  gof_matrix_sd[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_400mic$aa[i])),GOF_fitness_collapsed_all_400mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_400mic$stdfit[i])
+  gof_matrix_numortho[which(aminoacids$aa==as.character(GOF_fitness_collapsed_all_400mic$aa[i])),GOF_fitness_collapsed_all_400mic$position[i]] <- as.numeric(GOF_fitness_collapsed_all_400mic$numortho[i])
+}
+
+rownames(gof_matrix)<-aminoacids$aa
+colnames(gof_matrix)<-c(1:gof_ref_len)
+rownames(gof_matrix_num)<-aminoacids$aa
+colnames(gof_matrix_num)<-c(1:gof_ref_len)
+rownames(gof_matrix_sd)<-aminoacids$aa
+colnames(gof_matrix_sd)<-c(1:gof_ref_len)
+rownames(gof_matrix_numortho)<-aminoacids$aa
+colnames(gof_matrix_numortho)<-c(1:gof_ref_len)
+
+gof_matrix_melt <- melt(gof_matrix)
+gof_matrix_num_melt <- melt(gof_matrix_num)
+gof_matrix_sd_melt <- melt(gof_matrix_sd)
+gof_matrix_numortho_melt <- melt(gof_matrix_numortho)
+
+# Rename columns to "X1" and "X2"
+names(gof_matrix_melt)[names(gof_matrix_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_num_melt)[names(gof_matrix_num_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_sd_melt)[names(gof_matrix_sd_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+names(gof_matrix_numortho_melt)[names(gof_matrix_numortho_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+gof_matrix_melt_only_GOFpos <- gof_matrix_melt %>%
+  filter(X2 == 35)
+
+gof_matrix_melt_only_GOFpos$mutposnum <- 0
+gof_matrix_melt_only_GOFpos$mutposnum[which(gof_matrix_melt_only_GOFpos$X2==35)] <- 1
+
+gof_matrix_melt_only_GOFpos$aanum <- 0
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="A")] <- 12
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="C")] <- 10
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="D")] <- 5
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="E")] <- 4
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="F")] <- 19
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="G")] <- 11
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="H")] <- 3
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="I")] <- 15
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="K")] <- 1
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="L")] <- 14
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="M")] <- 16
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="N")] <- 6
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="P")] <- 17
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="Q")] <- 7
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="R")] <- 2
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="S")] <- 9
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="T")] <- 8
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="V")] <- 13
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="W")] <- 20
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="Y")] <- 18
+gof_matrix_melt_only_GOFpos$aanum[which(gof_matrix_melt_only_GOFpos$X1=="X")] <- 21
+
+gof_matrix_melt_only_GOFpos_wnum <- gof_matrix_melt_only_GOFpos %>%
+  inner_join(gof_matrix_num_melt,by=c("X1","X2")) %>%
+  dplyr::rename(mutnum=value.y,value=value.x)
+```
+
+#### GOF Position Plot
+
+Plot the mean fitness of each GoF mutation at the significant positions, with the number of mutants observed at each AA:
+```{r}
+# Define the order of amino acids for the rectangles
+rect_order <- c("T")
+
+# Create a data frame for the rectangles
+rect_data <- data.frame(
+aanum = match(rect_order, c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W","X")),
+xmin = seq(0.5, by = 1, length.out = length(rect_order)),
+xmax = seq(1.5, by = 1, length.out = length(rect_order)))
+
+#plot the data from all mutants:
+GOF_fit_nummut_plot_400mic <- ggplot(gof_matrix_melt_only_GOFpos_wnum, 
+       aes(x=mutposnum, y=aanum,
+           fill=value,
+           label=mutnum)) +
+  geom_tile() +
+  geom_text() +
+  # Add black rectangles
+  geom_rect(data = rect_data,
+           aes(xmin = xmin, xmax = xmax, ymin = aanum - 0.5, ymax = aanum + 0.5),
+           fill = NA, color = "black", inherit.aes = FALSE) +
+  labs(x = "Position (aa)",
+       y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", 
+                      high = "red",
+                      name="Fitness",
+                      na.value="grey",
+                      limit = c(0, max(gof_matrix_melt_only_GOFpos_wnum$value))) +
+  theme_minimal()+
+  scale_x_continuous(name="Position (aa)",
+                     breaks=c(1),
+                     labels=c("35"))+
+  scale_y_continuous(name="Amino acid", 
+                     breaks=c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21),
+                     labels=c("K","R","H","E","D","N","Q","T","S","C","G","A","V","L","I","M","P","Y","F","W","X"))
+
+print(GOF_fit_nummut_plot_400mic)
+```
+
+```{r echo=FALSE}
+ggsave(filename = "GOF/PLOTS/400xMIC/GOF_400xMIC.Fitness.by.Number.Mutants.png", 
+       plot = GOF_fit_nummut_plot_400mic,
+       width = 4.5, height = 4.5, units = "in")
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
