@@ -1,0 +1,2522 @@
+---
+title: "Resistance Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis", "zoo")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Import Data Files
+
+Import **PERFECTS** files generated from [DHFR.3.Perfects.RMD](https://github.com/PlesaLab/DHFR)
+```{r}
+# Fittree15good_taxa_merged
+Fittree15good_taxa_merged <- read.csv("Perfects/perfects_files_formatted/Fittree15good_taxa_merged.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# ncbi_taxa
+ncbi_taxa <- read.csv("Perfects/perfects_files_formatted/ncbi_taxa.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+Import **MUTANTS** files generated from [DHFR.4.Mutants.RMD](https://github.com/PlesaLab/DHFR)
+```{r}
+# Alltree15_taxa_merged
+Alltree15_taxa_merged <- read.csv("Mutants/mutants_files_formatted/Alltree15_taxa_merged.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# perfects_15_16_5BCs_tree
+perfects_15_16_5BCs_tree <- read.csv("Mutants/mutants_files_formatted/perfects_15_16_5BCs_tree.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# mut_collapse_15_good_filtered
+mut_collapse_15_good_filtered <- read.csv("Mutants/mutants_files_formatted/mut_collapse_15_good_filtered.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# orginfo
+orginfo <- read.csv("Mutants/mutants_files_formatted/orginfo.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+# Resistance Analysis
+
+## Resistant Taxa b/w Codons
+
+Start by plotting resistant taxa at 400x MIC (200 ug/mL TMP) shared between codon libraries
+
+Add fitness scores for Lib15 to the `Alltree15_taxa_merged` object prior to plotting (may or may not use downstream)
+```{r}
+Alltree15_taxa_merged <- Alltree15_taxa_merged %>%
+  left_join(perfects_15_16_5BCs_tree %>% select(ID, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03), by = "ID")
+```
+
+### Fitness Filtering
+
+Filter the `Alltree15_taxa_merged` dataset for distinct mutIDs with fitness values less than -1 (bad), greater than -1 (good), or greater than 0 (zero) at each TMP:
+```{r}
+# Complementation (0-TMP)
+BadFit_0_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD05D03 < -1)
+GoodFit_0_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD05D03 >= -1)
+ZeroFit_0_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD05D03 >= 0)
+
+# 0.058-TMP
+BadFit_0.058_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD06D03 < -1)
+GoodFit_0.058_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD06D03 >= -1)
+ZeroFit_0.058_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD06D03 >= 0)
+
+# 0.5-TMP
+BadFit_0.5_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD07D03 < -1)
+GoodFit_0.5_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD07D03 >= -1)
+ZeroFit_0.5_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD07D03 >= 0)
+
+# 1.0-TMP
+BadFit_1.0_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD08D03 < -1)
+GoodFit_1.0_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD08D03 >= -1)
+ZeroFit_1.0_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD08D03 >= 0)
+
+# 10-TMP
+BadFit_10_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD09D03 < -1)
+GoodFit_10_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD09D03 >= -1)
+ZeroFit_10_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD09D03 >= 0)
+
+# 50-TMP
+BadFit_50_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD10D03 < -1)
+GoodFit_50_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD10D03 >= -1)
+ZeroFit_50_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD10D03 >= 0)
+
+# 200-TMP
+BadFit_200_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD11D03 < -1)
+GoodFit_200_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD11D03 >= -1)
+ZeroFit_200_tmp <- Alltree15_taxa_merged %>%
+  filter(fitD11D03 >= 0)
+```
+
+### Resistance Summary Table
+
+Summarize the number of unique mutIDs with fitness values < -1 (bad), >= -1 (good), and >= 0 (zero):
+```{r class.output="goodCode"}
+fit_counts <- data.frame(
+  "Condition" = c("Complementation (0-TMP)", "0.058-TMP", "0.5-TMP", "1.0-TMP", "10-TMP", "50-TMP", "200-TMP"),
+  "mutIDs_bad" = c(nrow(BadFit_0_tmp), nrow(BadFit_0.058_tmp), nrow(BadFit_0.5_tmp),
+                 nrow(BadFit_1.0_tmp),nrow(BadFit_10_tmp), nrow(BadFit_50_tmp), nrow(BadFit_200_tmp)),
+  "mutIDs_good" = c(nrow(GoodFit_0_tmp), nrow(GoodFit_0.058_tmp), nrow(GoodFit_0.5_tmp),
+                 nrow(GoodFit_1.0_tmp),nrow(GoodFit_10_tmp), nrow(GoodFit_50_tmp), nrow(GoodFit_200_tmp)),
+  "mutIDs_zero" = c(nrow(ZeroFit_0_tmp), nrow(ZeroFit_0.058_tmp), nrow(ZeroFit_0.5_tmp), 
+                 nrow(ZeroFit_1.0_tmp), nrow(ZeroFit_10_tmp), nrow(ZeroFit_50_tmp), nrow(ZeroFit_200_tmp)))
+
+fit_counts
+```
+
+### Resistance Plots
+
+Plot at the **PHYLUM** level:
+```{r warning=FALSE, class.output="goodCode"}
+library(tidytext)
+
+min(GoodFit_200_tmp$fitD11D03)
+max(GoodFit_200_tmp$fitD11D03)
+
+# Create a long format data frame
+GoodFit_200_tmp_phylum_data <- GoodFit_200_tmp %>%
+  mutate(NCBI.genus = if_else(is.na(NCBI.genus), NCBI.family, NCBI.genus)) %>%
+  mutate(NCBI.species = if_else(is.na(NCBI.species), NCBI.genus, NCBI.species)) %>%
+  select(ID, NCBI.phylum, NCBI.genus, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness")
+
+# Plot the line graphs
+GoodFit_200_tmp_phylum_plot <- ggplot(GoodFit_200_tmp_phylum_data, 
+                                     aes(x = Condition, y = Fitness, 
+                                         group = ID, color = reorder_within(NCBI.species, NCBI.phylum, NCBI.phylum))) +
+  geom_line(linewidth = 0.75) +
+  facet_wrap(~NCBI.phylum, ncol = 3, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  #coord_cartesian(ylim = c(-6, 8)) +
+  #geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Taxonomic Resistance to Trimethoprim") +
+  guides(color = guide_legend(ncol = 1)) +
+  labs(color = "Species (mutID)")
+
+GoodFit_200_tmp_phylum_plot
+```
+
+```{r echo=FALSE, warning=FALSE}
+ggsave(file="Resistance/PLOTS/Shared/Lib15.16.perfects.NCBI.phylum.positive.fitness.200.tmp.png",
+       plot=GoodFit_200_tmp_phylum_plot,
+       dpi=600, width = 7.5, height = 7.5, units = "in")
+```
+
+Plot at the **CLASS** level:
+```{r warning=FALSE}
+# Create a long format data frame
+GoodFit_200_tmp_class_data <- GoodFit_200_tmp %>%
+  mutate(NCBI.genus = if_else(is.na(NCBI.genus), NCBI.family, NCBI.genus)) %>%
+  mutate(NCBI.species = if_else(is.na(NCBI.species), NCBI.genus, NCBI.species)) %>%
+  select(ID, NCBI.class, NCBI.genus, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness")
+
+# Plot the line graphs
+GoodFit_200_tmp_class_plot <- ggplot(GoodFit_200_tmp_class_data, 
+                                    aes(x = Condition, y = Fitness, group = ID, color = NCBI.species)) +
+  geom_line(linewidth = 0.75) +
+  facet_wrap(~NCBI.class, ncol = 3, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        legend.position = "right",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  #coord_cartesian(ylim = c(-10, 10)) +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Taxonomic Resistance at Class-level") +
+  guides(color = guide_legend(ncol = 1)) +
+  labs(color = "Species (mutID)")
+
+GoodFit_200_tmp_class_plot
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Shared/Lib15.16.perfects.NCBI.class.positive.fitness.200.tmp.png",
+       plot=GoodFit_200_tmp_class_plot,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+Plot at the **GENUS** level:
+```{r warning=FALSE}
+# Create a long format data frame
+GoodFit_200_tmp_data <- GoodFit_200_tmp %>%
+  mutate(NCBI.genus = if_else(is.na(NCBI.genus), NCBI.family, NCBI.genus)) %>%
+  mutate(NCBI.species = if_else(is.na(NCBI.species), NCBI.genus, NCBI.species)) %>%
+  select(ID, NCBI.class, NCBI.genus, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness")
+
+# Plot the line graphs
+GoodFit_200_tmp_plot <- ggplot(GoodFit_200_tmp_data, aes(x = Condition, y = Fitness, group = ID, color = NCBI.genus)) +
+  geom_line(linewidth = 0.75) +
+  facet_wrap(~NCBI.genus, ncol = 4, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  #coord_cartesian(ylim = c(-10, 10)) +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red")+
+  ggtitle("Unique mutID Positive Fitness at Genus-level")
+
+GoodFit_200_tmp_plot
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Shared/Lib15.16.perfects.NCBI.genus.positive.fitness.200.tmp.png",
+       plot=GoodFit_200_tmp_plot,
+       dpi=600, width = 6, height = 8, units = "in")
+```
+
+## Resistant Taxa Codon 1
+
+Retain the resistant taxa at 400x MIC for Codon 1 (Lib15):
+```{r}
+# Retain all resistant taxa at 400x MIC (fitness > -1)
+Fittree15good.200tmp.resistant <- Fittree15good_taxa_merged %>%
+  filter(fitD11D03 > -1)
+
+# Retain all susceptible taxa at 400x MIC (fitness < -1)
+Fittree15good.200tmp.dropout <- Fittree15good_taxa_merged %>%
+  filter(fitD11D03 < -1)
+```
+
+### Resistant Taxa Plot (ID)
+
+Plot in an organized manner for easier visual interpretation:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Fittree15good_long <- Fittree15good.200tmp.resistant %>%
+  pivot_longer(
+    cols = starts_with("fitD"),
+    names_to = "fit_variable",
+    values_to = "fit_value"
+  ) %>%
+  mutate(fit_variable = factor(fit_variable, 
+                               levels = paste0("fitD", sprintf("%02d", 5:11), "D03"),
+                               labels = c("0.0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Create vectors of IDs that you want to highlight
+highlight_blue_ids <- c("WP_007631135", "WP_007654866", "WP_008578924", "WP_008979999", "WP_008990832", "WP_010075211")
+highlight_green_ids <- c("WP_002839715", "WP_003686654", "WP_004442738", "WP_007817825", "WP_008152545", "WP_008237079", "WP_008369618", "WP_008390643", "WP_009746425", "WP_009778768")
+highlight_red_ids <- c("NP_229441", "NP_359022", "WP_001393556", "WP_003498667", "WP_003575033", "WP_004026355", "WP_004064107", "WP_004895238", "WP_006709593", "WP_008583481", "WP_010021426")
+
+# Combine all highlighted IDs in the desired order
+all_highlight_ids <- c(highlight_blue_ids, highlight_green_ids, highlight_red_ids)
+
+# Add a new column to indicate whether and how the ID should be highlighted
+Fittree15good_long <- Fittree15good_long %>%
+  mutate(highlight = case_when(
+    ID %in% highlight_blue_ids ~ "blue",
+    ID %in% highlight_green_ids ~ "green",
+    ID %in% highlight_red_ids ~ "red",
+    TRUE ~ "normal"
+  )) %>%
+  # Convert ID to a factor with the specified order
+  mutate(ID = factor(ID, levels = c(all_highlight_ids, setdiff(unique(ID), all_highlight_ids))))
+
+# Create the facet wrap plot
+Fittree15good.200tmp.resistant.plot.v2 <- ggplot(Fittree15good_long, aes(x = fit_variable, y = fit_value, group = ID)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ ID, scales = "free_y", ncol = 3) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "white"),  # Default background
+    strip.text = element_text(face = "bold")
+  ) +
+  labs(x = "Trimethoprim Concentration (ug/mL)", y = "Fitness Value", title = "Fitness Values by ID")
+
+# Add highlighted backgrounds for specific plots
+Fittree15good.200tmp.resistant.plot.v2 <- Fittree15good.200tmp.resistant.plot.v2 +
+  geom_rect(data = filter(Fittree15good_long, highlight == "blue"),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+            fill = "lightblue", alpha = 0.3, inherit.aes = FALSE) +
+  geom_rect(data = filter(Fittree15good_long, highlight == "green"),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+            fill = "lightgreen", alpha = 0.3, inherit.aes = FALSE) +
+  geom_rect(data = filter(Fittree15good_long, highlight == "red"),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+            fill = "pink", alpha = 0.3, inherit.aes = FALSE) +
+  geom_line() +  # Redraw lines to ensure they appear on top of the colored background
+  geom_point()   # Redraw points to ensure they appear on top of the colored background
+
+# Add dashed line at y = -1 for facets where it's within the y-axis range
+Fittree15good.200tmp.resistant.plot.v2 <- Fittree15good.200tmp.resistant.plot.v2 +
+  geom_hline(data = Fittree15good_long %>% 
+               group_by(ID) %>% 
+               summarize(min_y = min(fit_value), max_y = max(fit_value)) %>%
+               filter(min_y <= -1, max_y >= -1),
+             aes(yintercept = -1), 
+             linetype = "dashed", color = "red", alpha = 0.7)
+
+# Display the plot
+print(Fittree15good.200tmp.resistant.plot.v2)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Lib15.Perfects.Good.5BCs.400xMIC.Resistant.Lineplot.pdf", plot=Fittree15good.200tmp.resistant.plot.v2,
+       dpi=600, width = 6, height = 12, units = "in")
+```
+
+### Resistant Taxa Plot (Taxon)
+
+```{r warning=FALSE}
+# Define the desired ID order
+desired_id_order <- c("WP_007631135", "WP_007654866", "WP_008578924", "WP_008979999", "WP_010075211", "WP_008990832",  
+                      "WP_008369618", "WP_008390643", "WP_003686654", "WP_004442738", "WP_007817825", "WP_008152545", 
+                      "WP_008237079", "WP_009746425", "WP_009778768", "WP_002839715", "NP_229441", "NP_359022", 
+                      "WP_001393556", "WP_003498667", "WP_003575033", "WP_006709593", "WP_004064107", "WP_004895238",  
+                      "WP_008583481", "WP_004026355", "WP_010021426")
+
+Fittree15good_long <- Fittree15good_long %>%
+  mutate(highlight = case_when(
+    ID %in% highlight_blue_ids ~ "blue",
+    ID %in% highlight_green_ids ~ "green",
+    ID %in% highlight_red_ids ~ "red",
+    TRUE ~ "normal"
+  )) %>%
+  # Convert ID to a factor with the specified order
+  mutate(ID = factor(ID, levels = desired_id_order)) %>%
+  # Create a new column for faceting, using NCBI.class if NCBI.genus is NA
+  mutate(facet_var = ifelse(is.na(NCBI.class), NCBI.name, NCBI.class)) %>%
+  # Create a unique facet variable that includes both facet_var and ID
+  mutate(facet_var_unique = paste(facet_var, ID, sep = "_")) %>%
+  # Order the facet_var_unique based on the ID order
+  mutate(facet_var_unique = factor(facet_var_unique, 
+                                   levels = unique(facet_var_unique[order(match(ID, desired_id_order))])))
+
+# Now, when you create your plot, use facet_wrap with the ordered facet_var_unique
+Fittree15good.200tmp.resistant.plot.v2 <- ggplot(Fittree15good_long, aes(x = fit_variable, y = fit_value, group = ID)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ facet_var_unique, scales = "free_y", ncol = 3, 
+             labeller = labeller(facet_var_unique = function(x) gsub("_.*", "", x))) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(face = "bold")
+  ) +
+  labs(x = "Trimethoprim Concentration (ug/mL)", y = "Fitness Value", title = "Fitness Values by Genus/Class")
+
+# Add highlighted backgrounds for specific plots
+Fittree15good.200tmp.resistant.plot.v2 <- Fittree15good.200tmp.resistant.plot.v2 +
+  geom_rect(data = filter(Fittree15good_long, highlight == "blue"),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+            fill = "lightblue", alpha = 0.3, inherit.aes = FALSE) +
+  geom_rect(data = filter(Fittree15good_long, highlight == "green"),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+            fill = "lightgreen", alpha = 0.3, inherit.aes = FALSE) +
+  geom_rect(data = filter(Fittree15good_long, highlight == "red"),
+            aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+            fill = "pink", alpha = 0.3, inherit.aes = FALSE) +
+  geom_line() +
+  geom_point()
+
+# Add dashed line at y = -1 for facets where it's within the y-axis range
+Fittree15good.200tmp.resistant.plot.v2 <- Fittree15good.200tmp.resistant.plot.v2 +
+  geom_hline(data = Fittree15good_long %>% 
+               group_by(facet_var_unique) %>%
+               summarize(min_y = min(fit_value), max_y = max(fit_value)) %>%
+               filter(min_y <= -1, max_y >= -1),
+             aes(yintercept = -1), 
+             linetype = "dashed", color = "red", alpha = 0.7)
+
+# Display the plot
+print(Fittree15good.200tmp.resistant.plot.v2)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Lib15.Perfects.Good.5BCs.400xMIC.Resistant.Lineplot.Taxon.pdf", plot=Fittree15good.200tmp.resistant.plot.v2,
+       dpi=600, width = 6, height = 12, units = "in")
+```
+
+### Resistant Taxa Plot (Merged)
+
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Fittree15good_long <- Fittree15good.200tmp.resistant %>%
+  pivot_longer(
+    cols = starts_with("fitD"),
+    names_to = "fit_variable",
+    values_to = "fit_value"
+  ) %>%
+  mutate(fit_variable = factor(fit_variable, 
+                               levels = paste0("fitD", sprintf("%02d", 5:11), "D03"),
+                               labels = c("0.0", "0.058", "0.5", "1.0", "10", "50", "200"))) %>%
+  # Create a new column for faceting, using NCBI.phylum if NCBI.class is NA
+  mutate(facet_var = ifelse(is.na(NCBI.class), NCBI.name, NCBI.class)) %>%
+  # Arrange alphabetically by facet_var
+  arrange(facet_var)
+
+# Create the facet wrap plot
+Fittree15good.200tmp.resistant.plot.v2 <- ggplot(Fittree15good_long, aes(x = fit_variable, y = fit_value, group = ID, color = ID)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ facet_var, scales = "free_y", ncol = 3) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(x = "Trimethoprim Concentration (ug/mL)", y = "Fitness Value", 
+       title = "Fitness Values by Class/Phylum")
+
+# Add dashed line at y = -1 for facets where it's within the y-axis range
+Fittree15good.200tmp.resistant.plot.v2 <- Fittree15good.200tmp.resistant.plot.v2 +
+  geom_hline(data = Fittree15good_long %>% 
+               group_by(facet_var) %>% 
+               summarize(min_y = min(fit_value), max_y = max(fit_value)) %>%
+               filter(min_y <= -1, max_y >= -1),
+             aes(yintercept = -1), 
+             linetype = "dashed", color = "red", alpha = 0.7)
+
+# Display the plot
+print(Fittree15good.200tmp.resistant.plot.v2)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Lib15.Perfects.Good.5BCs.400xMIC.Resistant.Taxon.Merged.pdf", plot=Fittree15good.200tmp.resistant.plot.v2,
+       dpi=600, width = 6, height = 12, units = "in")
+```
+
+## Taxon Fitness by Phylum
+
+There is clear evidence from our phylogenetic trees that resistance follows clade-specific patterns, with more clades (genus-level) dropping out with increasing trimethoprim concentration. The following genus especially:
+
+-   Acinetobacter
+-   Bacillus
+-   Bacteroides
+-   Clostridium
+-   Neisseria
+-   Pseudomonas
+-   Streptococcus
+
+### Good Filtered Dataset
+
+First step is to make a copy of the complementing homolog (and their mutants) dataset and filter to retain relevent columns for the first sampling timepoint. Add NCBI taxonomy based on shared TaxID.
+```{r}
+# Make a copy of the filtered fitness data for homologs (and their mutants) capable of complementation (fit > -1 @ fitD05D03)
+L15_homo_mut_good_filtered <- mut_collapse_15_good_filtered %>%
+  select(ID, mutID, seq, 
+         fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03, 
+         numprunedBCs, numBCs, mutations, pct_ident)
+```
+
+Add "taxID" and "PctIdentEcoli" to each "ID"
+```{r}
+# Merge "TaxID" and "PctIdentEcoli" from `orginfo` to `L15_homo_mut_good_filtered`:
+L15_homo_mut_good_filtered <- L15_homo_mut_good_filtered %>%
+  left_join(orginfo %>% select(ID, TaxID, PctIdentEcoli), by = "ID")
+```
+
+Add the NCBI taxonomy based on shared TaxID:
+```{r}
+# Merge the NCBI taxonomy columns to Fittree15good_taxa based on shared TaxID
+L15_homo_mut_good_filtered$NCBI.name <- NA
+L15_homo_mut_good_filtered$NCBI.superkingdom <- NA
+L15_homo_mut_good_filtered$NCBI.phylum <- NA
+L15_homo_mut_good_filtered$NCBI.class <- NA
+L15_homo_mut_good_filtered$NCBI.order <- NA
+L15_homo_mut_good_filtered$NCBI.family <- NA
+L15_homo_mut_good_filtered$NCBI.genus <- NA
+L15_homo_mut_good_filtered$NCBI.species <- NA
+
+# NCBI.name
+L15_homo_mut_good_filtered$NCBI.name[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.name[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.superkingdom
+L15_homo_mut_good_filtered$NCBI.superkingdom[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.superkingdom[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.phylum
+L15_homo_mut_good_filtered$NCBI.phylum[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.phylum[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.class
+L15_homo_mut_good_filtered$NCBI.class[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.class[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.order
+L15_homo_mut_good_filtered$NCBI.order[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.order[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.family
+L15_homo_mut_good_filtered$NCBI.family[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.family[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.genus
+L15_homo_mut_good_filtered$NCBI.genus[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.genus[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# NCBI.species
+L15_homo_mut_good_filtered$NCBI.species[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID] <- ncbi_taxa$NCBI.species[match(L15_homo_mut_good_filtered$TaxID[L15_homo_mut_good_filtered$TaxID %in% ncbi_taxa$TaxID], ncbi_taxa$TaxID)]
+
+# Replace the value in "NCBI.phylum" column with the value from "NCBI.class" if "NCBI.phylum" is "Pseudomonadota"
+L15_homo_mut_good_filtered$NCBI.phylum <- ifelse(L15_homo_mut_good_filtered$NCBI.phylum == "Pseudomonadota", L15_homo_mut_good_filtered$NCBI.class, L15_homo_mut_good_filtered$NCBI.phylum)
+
+# Remove rows with NA in NCBI.phylum column
+L15_homo_mut_good_filtered <- L15_homo_mut_good_filtered[!is.na(L15_homo_mut_good_filtered$NCBI.phylum) & L15_homo_mut_good_filtered$NCBI.phylum != "NA", ]
+```
+
+Filter dataset to only retain perfects (mutations == 0)
+```{r class.output="goodCode"}
+L15_homo_mut_good_filtered_perfects <- L15_homo_mut_good_filtered %>%
+  filter(mutations == 0)
+
+length(unique(L15_homo_mut_good_filtered_perfects$ID))
+
+# Sum the number of rows for each unique NCBI.phylum
+L15_homo_mut_good_filtered_perfects_phylum_counts <- L15_homo_mut_good_filtered_perfects %>%
+  group_by(NCBI.phylum) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Print the table
+print(L15_homo_mut_good_filtered_perfects_phylum_counts)
+```
+
+### Phylum Datasets
+
+Subset by phylum to include perfects (mutations == 0) and all mutants (up to 5 AA distance):
+```{r}
+# Alphaproteobacteria (142 Variants)
+Alphaproteobacteria <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.phylum == "Alphaproteobacteria" & !is.na(L15_homo_mut_good_filtered$NCBI.phylum), ]
+
+# Betaproteobacteria (272 Variants)
+Betaproteobacteria <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.phylum == "Betaproteobacteria" & !is.na(L15_homo_mut_good_filtered$NCBI.phylum), ]
+
+# Gammaproteobacteria (1593 Variants)
+Gammaproteobacteria <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.phylum == "Gammaproteobacteria" & !is.na(L15_homo_mut_good_filtered$NCBI.phylum), ]
+
+# Bacillota (3623 Variants)
+Bacillota <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.phylum == "Bacillota" & !is.na(L15_homo_mut_good_filtered$NCBI.phylum), ]
+
+# Bacteroidota (1247 Variants)
+Bacteroidota <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.phylum == "Bacteroidota" & !is.na(L15_homo_mut_good_filtered$NCBI.phylum), ]
+```
+
+### Fitness Line Plots
+
+#### Alphaproteobacteria
+```{r warning=FALSE}
+# Prepare the main data and remove rows with NA values in fitness conditions or NCBI.species
+Alphaproteobacteria.data <- Alphaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Remove rows with NA in NCBI.species first
+  filter(!is.na(fitD11D03)) %>%  # Remove rows with NA in fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Remove rows with NA in Fitness
+
+# Create a dataframe to determine the color for each mutID
+color_assignment <- Alphaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Ensure no NA values for species
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  distinct() %>%  # Ensure unique entries for color assignment
+  mutate(color = case_when(
+    mutations == 0 ~ "red",
+    mutations != 0 & fitD11D03 < -1 ~ "darkblue",
+    mutations != 0 & fitD11D03 > -1 ~ "gold",
+    TRUE ~ "gray"  # Default color for other cases
+  ))
+
+# Join the color assignment to the main data
+Alphaproteobacteria.data <- Alphaproteobacteria.data %>%
+  left_join(color_assignment, by = c("mutID", "NCBI.species")) 
+
+# Filter out any rows where color is NA after joining
+Alphaproteobacteria.data <- Alphaproteobacteria.data %>%
+  filter(!is.na(color), !is.na(NCBI.species))  # Ensure no NA values in color or species
+
+# Create a subset for reference lines (mutations == 0)
+reference_data <- Alphaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(mutations == 0) %>%
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Ensure Fitness is not NA
+
+# Final check to remove any empty species from reference_data before plotting
+reference_data <- reference_data %>%
+  filter(NCBI.species != "") # Remove empty species if necessary
+
+# Plot the line graphs
+Alphaproteobacteria.plot <- ggplot(Alphaproteobacteria.data, 
+                             aes(x = Condition, y = Fitness, 
+                                 group = mutID, color = color)) +
+  geom_line(linewidth = 0.75) +          # Plot mutant lines
+  geom_point(size = 1) +                 # Plot points for visibility
+  geom_line(data = reference_data, aes(x = Condition, y = Fitness), 
+            color = "red", linewidth = 1.25) + # Plot reference lines on top
+  facet_wrap(~NCBI.species, ncol = 2, scales = "free_y") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), # Slant x-axis labels
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "gray90"),  
+        strip.text = element_text(face = "plain"),
+        panel.grid.major = element_blank(),     # Remove major grid lines
+        panel.grid.minor = element_blank()) +   # Remove minor grid lines
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  scale_color_identity() +                # Use the color values directly
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Alphaproteobacteria Resistance to Trimethoprim") +
+  labs(x = "TMP Concentration", y = "Fitness")
+
+# Display the plot
+print(Alphaproteobacteria.plot)
+```
+
+
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Codon1.Good.5BCs.Alphaproteobacteria.png", 
+       plot=Alphaproteobacteria.plot,
+       dpi=600, width = 10, height = 10, units = "in")
+```
+
+#### Bacillota
+```{r warning=FALSE}
+# Prepare the main data and remove rows with NA values in fitness conditions or NCBI.species
+Bacillota.data <- Bacillota %>%
+  select(mutID, mutations, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Remove rows with NA in NCBI.species first
+  filter(!is.na(fitD11D03)) %>%  # Remove rows with NA in fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Remove rows with NA in Fitness
+
+# Create a dataframe to determine the color for each mutID
+color_assignment <- Bacillota %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Ensure no NA values for species
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  distinct() %>%  # Ensure unique entries for color assignment
+  mutate(color = case_when(
+    mutations == 0 ~ "red",
+    mutations != 0 & fitD11D03 < -1 ~ "darkblue",
+    mutations != 0 & fitD11D03 > -1 ~ "gold",
+    TRUE ~ "gray"  # Default color for other cases
+  ))
+
+# Join the color assignment to the main data
+Bacillota.data <- Bacillota.data %>%
+  left_join(color_assignment, by = c("mutID", "NCBI.species")) 
+
+# Filter out any rows where color is NA after joining
+Bacillota.data <- Bacillota.data %>%
+  filter(!is.na(color), !is.na(NCBI.species))  # Ensure no NA values in color or species
+
+# Create a subset for reference lines (mutations == 0)
+reference_data <- Bacillota %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(mutations == 0) %>%
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Ensure Fitness is not NA
+
+# Final check to remove any empty species from reference_data before plotting
+reference_data <- reference_data %>%
+  filter(NCBI.species != "") # Remove empty species if necessary
+
+# Plot the line graphs
+Bacillota.plot <- ggplot(Bacillota.data, 
+                             aes(x = Condition, y = Fitness, 
+                                 group = mutID, color = color)) +
+  geom_line(linewidth = 0.75) +          # Plot mutant lines
+  geom_point(size = 1) +                 # Plot points for visibility
+  geom_line(data = reference_data, aes(x = Condition, y = Fitness), 
+            color = "red", linewidth = 1.25) + # Plot reference lines on top
+  facet_wrap(~NCBI.species, ncol = 8, scales = "free_y") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), # Slant x-axis labels
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "gray90"),  
+        strip.text = element_text(face = "plain"),
+        panel.grid.major = element_blank(),     # Remove major grid lines
+        panel.grid.minor = element_blank()) +   # Remove minor grid lines
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  scale_color_identity() +                # Use the color values directly
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Bacillota Resistance to Trimethoprim") +
+  labs(x = "TMP Concentration", y = "Fitness")
+
+# Display the plot
+print(Bacillota.plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Codon1.Good.5BCs.Bacillota.png", 
+       plot=Bacillota.plot,
+       dpi=600, width = 20, height = 20, units = "in")
+```
+
+#### Bacteroidota
+```{r warning=FALSE}
+# Prepare the main data and remove rows with NA values in fitness conditions or NCBI.species
+Bacteroidota.data <- Bacteroidota %>%
+  select(mutID, mutations, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Remove rows with NA in NCBI.species first
+  filter(!is.na(fitD11D03)) %>%  # Remove rows with NA in fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Remove rows with NA in Fitness
+
+# Create a dataframe to determine the color for each mutID
+color_assignment <- Bacteroidota %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Ensure no NA values for species
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  distinct() %>%  # Ensure unique entries for color assignment
+  mutate(color = case_when(
+    mutations == 0 ~ "red",
+    mutations != 0 & fitD11D03 < -1 ~ "darkblue",
+    mutations != 0 & fitD11D03 > -1 ~ "gold",
+    TRUE ~ "gray"  # Default color for other cases
+  ))
+
+# Join the color assignment to the main data
+Bacteroidota.data <- Bacteroidota.data %>%
+  left_join(color_assignment, by = c("mutID", "NCBI.species")) 
+
+# Filter out any rows where color is NA after joining
+Bacteroidota.data <- Bacteroidota.data %>%
+  filter(!is.na(color), !is.na(NCBI.species))  # Ensure no NA values in color or species
+
+# Create a subset for reference lines (mutations == 0)
+reference_data <- Bacteroidota %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(mutations == 0) %>%
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Ensure Fitness is not NA
+
+# Final check to remove any empty species from reference_data before plotting
+reference_data <- reference_data %>%
+  filter(NCBI.species != "") # Remove empty species if necessary
+
+# Plot the line graphs
+Bacteroidota.plot <- ggplot(Bacteroidota.data, 
+                             aes(x = Condition, y = Fitness, 
+                                 group = mutID, color = color)) +
+  geom_line(linewidth = 0.75) +          # Plot mutant lines
+  geom_point(size = 1) +                 # Plot points for visibility
+  geom_line(data = reference_data, aes(x = Condition, y = Fitness), 
+            color = "red", linewidth = 1.25) + # Plot reference lines on top
+  facet_wrap(~NCBI.species, ncol = 7, scales = "free_y") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), # Slant x-axis labels
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "gray90"),  
+        strip.text = element_text(face = "plain"),
+        panel.grid.major = element_blank(),     # Remove major grid lines
+        panel.grid.minor = element_blank()) +   # Remove minor grid lines
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  scale_color_identity() +                # Use the color values directly
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Bacteroidota Resistance to Trimethoprim") +
+  labs(x = "TMP Concentration", y = "Fitness")
+
+# Display the plot
+print(Bacteroidota.plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Codon1.Good.5BCs.Bacteroidota.png", 
+       plot=Bacteroidota.plot,
+       dpi=600, width = 20, height = 20, units = "in")
+```
+
+#### Betaproteobacteria
+```{r warning=FALSE}
+# Prepare the main data and remove rows with NA values in fitness conditions or NCBI.species
+Betaproteobacteria.data <- Betaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Remove rows with NA in NCBI.species first
+  filter(!is.na(fitD11D03)) %>%  # Remove rows with NA in fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Remove rows with NA in Fitness
+
+# Create a dataframe to determine the color for each mutID
+color_assignment <- Betaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Ensure no NA values for species
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  distinct() %>%  # Ensure unique entries for color assignment
+  mutate(color = case_when(
+    mutations == 0 ~ "red",
+    mutations != 0 & fitD11D03 < -1 ~ "darkblue",
+    mutations != 0 & fitD11D03 > -1 ~ "gold",
+    TRUE ~ "gray"  # Default color for other cases
+  ))
+
+# Join the color assignment to the main data
+Betaproteobacteria.data <- Betaproteobacteria.data %>%
+  left_join(color_assignment, by = c("mutID", "NCBI.species")) 
+
+# Filter out any rows where color is NA after joining
+Betaproteobacteria.data <- Betaproteobacteria.data %>%
+  filter(!is.na(color), !is.na(NCBI.species))  # Ensure no NA values in color or species
+
+# Create a subset for reference lines (mutations == 0)
+reference_data <- Betaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(mutations == 0) %>%
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Ensure Fitness is not NA
+
+# Final check to remove any empty species from reference_data before plotting
+reference_data <- reference_data %>%
+  filter(NCBI.species != "") # Remove empty species if necessary
+
+# Plot the line graphs
+Betaproteobacteria.plot <- ggplot(Betaproteobacteria.data, 
+                             aes(x = Condition, y = Fitness, 
+                                 group = mutID, color = color)) +
+  geom_line(linewidth = 0.75) +          # Plot mutant lines
+  geom_point(size = 1) +                 # Plot points for visibility
+  geom_line(data = reference_data, aes(x = Condition, y = Fitness), 
+            color = "red", linewidth = 1.25) + # Plot reference lines on top
+  facet_wrap(~NCBI.species, ncol = 3, scales = "free_y") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), # Slant x-axis labels
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "gray90"),  
+        strip.text = element_text(face = "plain"),
+        panel.grid.major = element_blank(),     # Remove major grid lines
+        panel.grid.minor = element_blank()) +   # Remove minor grid lines
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  scale_color_identity() +                # Use the color values directly
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Betaproteobacteria Resistance to Trimethoprim") +
+  labs(x = "TMP Concentration", y = "Fitness")
+
+# Display the plot
+print(Betaproteobacteria.plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Codon1.Good.5BCs.Betaproteobacteria.png", 
+       plot=Betaproteobacteria.plot,
+       dpi=600, width = 12, height = 14, units = "in")
+```
+
+#### Gammaproteobacteria
+```{r warning=FALSE}
+# Prepare the main data and remove rows with NA values in fitness conditions or NCBI.species
+Gammaproteobacteria.data <- Gammaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Remove rows with NA in NCBI.species first
+  filter(!is.na(fitD11D03)) %>%  # Remove rows with NA in fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Remove rows with NA in Fitness
+
+# Create a dataframe to determine the color for each mutID
+color_assignment <- Gammaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(!is.na(NCBI.species)) %>%  # Ensure no NA values for species
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  distinct() %>%  # Ensure unique entries for color assignment
+  mutate(color = case_when(
+    mutations == 0 ~ "red",
+    mutations != 0 & fitD11D03 < -1 ~ "darkblue",
+    mutations != 0 & fitD11D03 > -1 ~ "gold",
+    TRUE ~ "gray"  # Default color for other cases
+  ))
+
+# Join the color assignment to the main data
+Gammaproteobacteria.data <- Gammaproteobacteria.data %>%
+  left_join(color_assignment, by = c("mutID", "NCBI.species")) 
+
+# Filter out any rows where color is NA after joining
+Gammaproteobacteria.data <- Gammaproteobacteria.data %>%
+  filter(!is.na(color), !is.na(NCBI.species))  # Ensure no NA values in color or species
+
+# Create a subset for reference lines (mutations == 0)
+reference_data <- Gammaproteobacteria %>%
+  select(mutID, mutations, NCBI.species, fitD11D03) %>%
+  filter(mutations == 0) %>%
+  filter(!is.na(fitD11D03)) %>%  # Ensure no NA values for fitD11D03
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness") %>%
+  filter(!is.na(Fitness))  # Ensure Fitness is not NA
+
+# Final check to remove any empty species from reference_data before plotting
+reference_data <- reference_data %>%
+  filter(NCBI.species != "") # Remove empty species if necessary
+
+# Plot the line graphs
+Gammaproteobacteria.plot <- ggplot(Gammaproteobacteria.data, 
+                             aes(x = Condition, y = Fitness, 
+                                 group = mutID, color = color)) +
+  geom_line(linewidth = 0.75) +          # Plot mutant lines
+  geom_point(size = 1) +                 # Plot points for visibility
+  geom_line(data = reference_data, aes(x = Condition, y = Fitness), 
+            color = "red", linewidth = 1.25) + # Plot reference lines on top
+  facet_wrap(~NCBI.species, ncol = 5, scales = "free_y") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), # Slant x-axis labels
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "gray90"),  
+        strip.text = element_text(face = "plain"),
+        panel.grid.major = element_blank(),     # Remove major grid lines
+        panel.grid.minor = element_blank()) +   # Remove minor grid lines
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  scale_color_identity() +                # Use the color values directly
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Gammaproteobacteria Resistance to Trimethoprim") +
+  labs(x = "TMP Concentration", y = "Fitness")
+
+# Display the plot
+print(Gammaproteobacteria.plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Codon1.Good.5BCs.Gammaproteobacteria.png", 
+       plot=Gammaproteobacteria.plot,
+       dpi=600, width = 16, height = 20, units = "in")
+```
+
+### Genus Case-Studies
+
+Now, create separate dataframes for each Genus of interest:
+```{r}
+# Acinetobacter
+Acinetobacter <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Acinetobacter" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Bacillus
+Bacillus <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Bacillus" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Bacteroides
+Bacteroides <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Bacteroides" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Chlamydia
+Chlamydia <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Chlamydia" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Clostridium
+Clostridium <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Clostridium" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Escherichia
+Escherichia <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Escherichia" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Neisseria
+Neisseria <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Neisseria" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Pseudomonas
+Pseudomonas <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Pseudomonas" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+
+# Streptococcus
+Streptococcus <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.genus == "Streptococcus" & !is.na(L15_homo_mut_good_filtered$NCBI.genus), ]
+```
+
+#### Streptococcus Fitness
+
+Fitness line plot for each Streptococcus species (Bacillota)
+```{r warning=FALSE}
+Streptococcus.data <- Streptococcus %>%
+  filter(mutations == 0) %>%
+  select(ID, NCBI.species, fitD05D03, fitD06D03, fitD07D03, fitD08D03, fitD09D03, fitD10D03, fitD11D03) %>%
+  pivot_longer(cols = starts_with("fitD"), names_to = "Condition", values_to = "Fitness")
+
+# Plot the line graphs
+Streptococcus.plot <- ggplot(Streptococcus.data, 
+                             aes(x = Condition, y = Fitness, 
+                                 group = ID, color = NCBI.species)) +
+  geom_line(linewidth = 0.75) +
+  facet_wrap(~NCBI.species, ncol = 4, scales = "free_y") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_x_discrete(labels = c("fitD05D03" = "0-TMP",
+                              "fitD06D03" = "0.058-TMP",
+                              "fitD07D03" = "0.5-TMP",
+                              "fitD08D03" = "1.0-TMP",
+                              "fitD09D03" = "10-TMP",
+                              "fitD10D03" = "50-TMP",
+                              "fitD11D03" = "200-TMP")) +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red") +
+  ggtitle("Streptococcus Resistance to Trimethoprim") +
+  guides(color = guide_legend(ncol = 1)) +
+  labs(color = "Species (ID)", x = "TMP Concentration", y = "Fitness")
+
+# Display the plot
+print(Streptococcus.plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Codon1/Lib15.Good.5BCs.Streptococcus.Perfects.Lineplot.pdf", 
+       plot=Streptococcus.plot,
+       dpi=600, width = 14, height = 12, units = "in")
+```
+
+## Pathogenic Taxa
+
+Subset the fitness scores across the TMP gradient for a select set of known pathogenic bacterial taxa.
+```{r}
+# Subset the pathogenic variants of interest for plotting
+pathogenic_mutID <- c("NP_414590", "WP_000175742", "WP_011272274", "WP_000973544", "WP_002205327", "WP_000624384", "NP_831957", "WP_004836669")
+
+# Create the subset dataframe
+pathogenic_data <- L15_homo_mut_good_filtered %>%
+  filter(mutID %in% pathogenic_mutID)
+```
+
+Plot the change in fitness across the TMP gradient for a select set of known pathogenic bacterial taxa.
+```{r warning=FALSE}
+# Reshape the data and rename mutIDs to species names
+pathogenic_data_long <- pathogenic_data %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "Day", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(Day, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200"))) %>%
+  mutate(Species = NCBI.species)  # Create a new column for species names
+
+# Generate a color palette with enough colors for all species
+n_colors <- length(unique(pathogenic_data_long$Species))
+color_palette <- colorRampPalette(brewer.pal(8, "Dark2"))(n_colors)
+```
+
+```{r warning=FALSE}
+# Create the plot
+pathogenic_plot <- ggplot(pathogenic_data_long, aes(x = Day, y = Fitness, group = Species, color = Species)) +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  geom_line(size = 1.0) +
+  geom_point(size = 3) +
+  scale_color_manual(values = setNames(color_palette, unique(pathogenic_data_long$Species))) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14)) +
+  ggtitle("Pathogenic Homologs") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 16))
+
+# Print the plot
+print(pathogenic_plot)
+```
+
+```{r}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Pathogenic.Fitness.png", 
+       plot=pathogenic_plot,
+       dpi=600, width = 8, height = 5, units = "in")
+```
+
+## Taxa Alignments
+
+Generate FASTA files for phylogenetic taxa of interest and perform a multiple sequence alignment to determine differences in AA positions influencing TMP resistance across the concentration gradient.
+
+### Escherichia coli
+
+```{r class.output="goodCode"}
+# Filter to retain Escherichia coli (NCBI.species) from L15_homo_mut_good_filtered
+Escherichia <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.species == "Escherichia coli" & 
+                                            !is.na(L15_homo_mut_good_filtered$NCBI.species), ]
+
+# Filter the dataframe for rows where mutations == 0
+Escherichia_filtered <- Escherichia[Escherichia$mutations == 0, ]
+
+# Create a function to write FASTA entries
+write_fasta <- function(id, seq, file) {
+  cat(paste0(">", id, "\n"), file = file, append = TRUE)
+  cat(paste0("M", seq, "\n"), file = file, append = TRUE)  # Add "M" at the beginning of the sequence
+}
+
+# Specify the output file name
+Escherichia_output_file <- "Resistance/FASTA/Escherichia.fasta"
+
+# Remove the file if it already exists
+if (file.exists(Escherichia_output_file)) {
+  file.remove(Escherichia_output_file)
+}
+
+# Write the FASTA entries to the file
+for (i in 1:nrow(Escherichia_filtered)) {
+  write_fasta(Escherichia_filtered$mutID[i], Escherichia_filtered$seq[i], Escherichia_output_file)
+}
+
+cat("FASTA file has been generated:", Escherichia_output_file, "\n")
+```
+
+Perform a multiple sequence alignment on the FASTA file using CLUSTAL Omega:
+```{bash}
+# May need to enable permissions to run the executable:
+#chmod +x clustalo
+./Scripts/clustalo -i Resistance/FASTA/Escherichia.fasta -o Resistance/FASTA/Escherichia.aligned.fasta --outfmt=fa --force
+```
+
+Import the MSA file and determine which amino acid positions differ between the samples:
+```{r class.output="goodCode"}
+# Import the MSA file
+msa <- readAAMultipleAlignment("Resistance/FASTA/Escherichia.aligned.fasta", format="fasta")
+
+# Convert to a matrix for easier manipulation
+msa_matrix <- as.matrix(msa)
+
+# Set the reference sequence
+ref_seq <- "NP_414590"
+
+cat("Using reference sequence:", ref_seq, "\n")
+
+# Find positions where amino acids differ
+diff_positions <- which(apply(msa_matrix, 2, function(col) length(unique(col)) > 1))
+
+# Create a summary dataframe
+summary_df <- data.frame(
+  Position = diff_positions,
+  RefAA = msa_matrix[ref_seq, diff_positions],
+  stringsAsFactors = FALSE
+)
+
+# Add columns for each unique mutID
+unique_mutIDs <- setdiff(rownames(msa_matrix), ref_seq)
+for (mutID in unique_mutIDs) {
+  summary_df[[mutID]] <- msa_matrix[mutID, diff_positions]
+}
+
+# Add a column for the amino acid changes
+summary_df$Changes <- apply(summary_df, 1, function(row) {
+  changes <- setdiff(as.character(row[3:ncol(summary_df)]), row["RefAA"])
+  if (length(changes) > 0) {
+    paste(row["RefAA"], paste(changes, collapse = "/"), sep = "->")
+  } else {
+    "No change"
+  }
+})
+
+# Remove rows with "No change"
+summary_df <- summary_df[summary_df$Changes != "No change", ]
+
+# Reorder columns
+summary_df <- summary_df %>% 
+  select(Position, RefAA, Changes, everything())
+
+# Print the summary table
+print(summary_df, row.names = FALSE)
+```
+
+Heatmap for amino acid mutations by position based on reference sequence:
+```{r}
+# Get all positions where there's a mutation
+all_positions <- sort(unique(summary_df$Position))
+
+# Reshape the data
+heatmap_data <- summary_df %>%
+  select(-Changes) %>%
+  pivot_longer(cols = -c(Position, RefAA), 
+               names_to = "mutID", 
+               values_to = "AA") %>%
+  mutate(Position = as.numeric(Position))
+
+# Add the reference sequence
+ref_data <- summary_df %>%
+  select(Position, RefAA) %>%
+  mutate(mutID = "NP_414590", AA = RefAA)
+
+heatmap_data <- bind_rows(ref_data, heatmap_data)
+
+# Create a function to compare amino acids
+compare_aa <- function(aa, ref_aa) {
+  ifelse(is.na(aa) | aa == "", "No data",
+         ifelse(aa == ref_aa, "No change", "Mutation"))
+}
+
+# Apply the comparison function
+heatmap_data <- heatmap_data %>%
+  group_by(Position) %>%
+  mutate(Comparison = compare_aa(AA, AA[mutID == "NP_220129"])) %>%
+  ungroup()
+
+# Create a continuous position variable
+heatmap_data <- heatmap_data %>%
+  arrange(Position) %>%
+  mutate(PositionIndex = as.numeric(factor(Position, levels = unique(Position))))
+
+# Create the heatmap
+Escherichia.heatmap <- ggplot(heatmap_data, aes(x = PositionIndex, y = mutID, fill = Comparison)) +
+  geom_tile(color = "white", width = 1, height = 0.9) +
+  scale_fill_manual(values = c("No change" = "grey90", "Mutation" = "red", "No data" = "white")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+    axis.text.y = element_text(size = 8),
+    axis.title.y = element_blank(),
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black", size = 0.5),
+    legend.position = "bottom"
+  ) +
+  labs(x = "Position", fill = "Amino Acid Change") +
+  scale_x_continuous(
+    breaks = heatmap_data$PositionIndex,
+    labels = heatmap_data$Position,
+    expand = c(0, 0)
+  ) +
+  scale_y_discrete(expand = c(0, 0)) +
+  geom_text(aes(label = AA), size = 3, na.rm = TRUE) +
+  scale_y_discrete(limits = rev(unique(heatmap_data$mutID)))  # Reverse y-axis to put reference on top
+
+#print(Escherichia.heatmap)
+```
+
+Plot the change in fitness across the TMP gradient for both samples:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Escherichia_long <- Escherichia_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "Day", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(Day, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Create a new column for coloring
+Escherichia_long <- Escherichia_long %>%
+  mutate(Color = ifelse(mutID == "NP_414590", "WT", "Mutant"))
+
+# Create the plot
+Escherichia_plot <- ggplot(Escherichia_long, aes(x = Day, y = Fitness, group = mutID)) +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  geom_line(aes(color = Color), size = 1.0) +
+  geom_point(aes(color = Color), size = 3) +
+  scale_color_manual(values = c("WT" = "red", "Mutant" = "gold2")) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 8)) +
+  ggtitle("Escherichia coli") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+# Print the plot
+print(Escherichia_plot)
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Final/Escherichia.fitness.png", 
+       plot=Escherichia_plot,
+       dpi=600, width = 3, height = 3.5, units = "in")
+```
+
+```{r echo=FALSE}
+ggsave(file="Resistance/PLOTS/Final/Escherichia.fitness.v2.png", 
+       plot=Escherichia_plot,
+       dpi=600, width = 8, height = 4, units = "in")
+```
+
+### Streptococcus pneumoniae
+
+```{r class.output="goodCode"}
+# Filter to retain Escherichia coli (NCBI.species) from L15_homo_mut_good_filtered
+Streptococcus <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.species == "Streptococcus pneumoniae" & 
+                                            !is.na(L15_homo_mut_good_filtered$NCBI.species), ]
+
+# Filter to only retain specific variants for the MSA
+Streptococcus_filtered <- Streptococcus %>%
+  filter((mutID == "WP_002205327" | ID == "WP_002205327") & !is.na(fitD11D03))
+
+# Create a csv copy of the filtered dataset
+write.csv(Streptococcus_filtered, file = "Resistance/Streptococcus.fitness.csv", row.names = FALSE)
+
+# Create a function to write FASTA entries
+write_fasta <- function(id, seq, file) {
+  cat(paste0(">", id, "\n"), file = file, append = TRUE)
+  cat(paste0("M", seq, "\n"), file = file, append = TRUE)  # Add "M" at the beginning of the sequence
+}
+
+# Specify the output file name
+Streptococcus_output_file <- "Resistance/FASTA/Streptococcus.fasta"
+
+# Remove the file if it already exists
+if (file.exists(Streptococcus_output_file)) {
+  file.remove(Streptococcus_output_file)
+}
+
+# Write the FASTA entries to the file
+for (i in 1:nrow(Streptococcus_filtered)) {
+  write_fasta(Streptococcus_filtered$mutID[i], Streptococcus_filtered$seq[i], Streptococcus_output_file)
+}
+
+cat("FASTA file has been generated:", Streptococcus_output_file, "\n")
+```
+
+Perform a multiple sequence alignment on the FASTA file using CLUSTAL Omega:
+```{bash}
+# May need to enable permissions to run the executable:
+#chmod +x clustalo
+./Scripts/clustalo -i Resistance/FASTA/Streptococcus.fasta -o Resistance/FASTA/Streptococcus.aligned.fasta --outfmt=fa --force
+```
+
+Import the MSA file and determine which amino acid positions differ between the samples
+```{r class.output="goodCode"}
+# Import the MSA file
+msa <- readAAMultipleAlignment("Resistance/FASTA/Streptococcus.aligned.fasta", format="fasta")
+
+# Convert to a matrix for easier manipulation
+msa_matrix <- as.matrix(msa)
+
+# Set the reference sequence
+ref_seq <- "WP_002205327"
+
+cat("Using reference sequence:", ref_seq, "\n")
+
+# Find positions where amino acids differ
+diff_positions <- which(apply(msa_matrix, 2, function(col) length(unique(col)) > 1))
+
+# Create a summary dataframe
+summary_df <- data.frame(
+  Position = diff_positions,
+  RefAA = msa_matrix[ref_seq, diff_positions],
+  stringsAsFactors = FALSE
+)
+
+# Add columns for each unique mutID
+unique_mutIDs <- setdiff(rownames(msa_matrix), ref_seq)
+for (mutID in unique_mutIDs) {
+  summary_df[[mutID]] <- msa_matrix[mutID, diff_positions]
+}
+
+# Add a column for the amino acid changes
+summary_df$Changes <- apply(summary_df, 1, function(row) {
+  changes <- setdiff(as.character(row[3:ncol(summary_df)]), row["RefAA"])
+  if (length(changes) > 0) {
+    paste(row["RefAA"], paste(changes, collapse = "/"), sep = "->")
+  } else {
+    "No change"
+  }
+})
+
+# Remove rows with "No change"
+summary_df <- summary_df[summary_df$Changes != "No change", ]
+
+# Reorder columns
+summary_df <- summary_df %>% 
+  select(Position, RefAA, Changes, everything())
+
+# Print the summary table
+print(summary_df, row.names = FALSE)
+```
+
+Arrange the data for the amino acid mutations heatmap:
+```{r}
+# Get all positions where there's a mutation
+all_positions <- sort(unique(summary_df$Position))
+
+# Reshape the data
+heatmap_data <- summary_df %>%
+  select(-Changes) %>%
+  pivot_longer(cols = -c(Position, RefAA), 
+               names_to = "mutID", 
+               values_to = "AA") %>%
+  mutate(Position = as.numeric(Position))
+
+# Add the reference sequence
+ref_data <- summary_df %>%
+  select(Position, RefAA) %>%
+  mutate(mutID = "WP_002205327", AA = RefAA)
+
+heatmap_data <- bind_rows(ref_data, heatmap_data)
+
+# Create a function to compare amino acids
+compare_aa <- function(aa, ref_aa) {
+  ifelse(is.na(aa) | aa == "", "No data",
+         ifelse(aa == ref_aa, "No change", "Mutation"))
+}
+
+# Apply the comparison function and modify AA display
+heatmap_data <- heatmap_data %>%
+  group_by(Position) %>%
+  mutate(
+    Comparison = compare_aa(AA, AA[mutID == "WP_002205327"]),
+    DisplayAA = case_when(
+      mutID == "WP_002205327" ~ AA,
+      Comparison == "Mutation" ~ AA,
+      TRUE ~ ""
+    )
+  ) %>%
+  ungroup()
+
+# Create a continuous position variable
+heatmap_data <- heatmap_data %>%
+  arrange(Position) %>%
+  mutate(PositionIndex = as.numeric(factor(Position, levels = unique(Position))))
+
+# Create Streptococcus_long
+Streptococcus_long <- Streptococcus_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD")
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+max_fitness <- Streptococcus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join max_fitness information and create MutantColor
+heatmap_data <- heatmap_data %>%
+  left_join(max_fitness, by = "mutID") %>%
+  mutate(MutantColor = case_when(
+    mutID == "WP_002205327" ~ "red",
+    is.na(max_fitness) ~ "gray",
+    max_fitness < -1 ~ "darkblue",
+    max_fitness >= -1 ~ "gold2"
+  ))
+
+# Create a new column for ordering
+heatmap_data <- heatmap_data %>%
+  mutate(OrderGroup = case_when(
+    mutID == "WP_002205327" ~ 1,
+    max_fitness >= -1 ~ 2,
+    max_fitness < -1 ~ 3,
+    TRUE ~ 4  # for any NA or other cases
+  ))
+```
+
+Heatmap for amino acid mutations by position based on reference sequence:
+```{r}
+# Order the data with reference on top
+heatmap_data <- heatmap_data %>%
+  arrange(OrderGroup, desc(max_fitness)) %>%
+  mutate(mutID = factor(mutID, levels = unique(mutID)))
+
+# Ensure the colors are assigned correctly
+y_colors <- heatmap_data %>%
+  distinct(mutID, MutantColor) %>%
+  arrange(match(mutID, levels(heatmap_data$mutID)))
+
+# Modify the heatmap_data to include the color information for mutations and text
+heatmap_data <- heatmap_data %>%
+  mutate(
+    MutationColor = case_when(
+      Comparison == "Mutation" & max_fitness >= -1 ~ "gold2",
+      Comparison == "Mutation" & max_fitness < -1 ~ "darkblue",
+      TRUE ~ Comparison
+    ),
+    TextColor = case_when(
+      MutationColor == "darkblue" ~ "white",
+      TRUE ~ "black"
+    )
+  )
+
+# Create the heatmap
+Streptococcus.heatmap <- ggplot(heatmap_data, aes(x = PositionIndex, y = mutID, fill = MutationColor)) +
+  geom_tile(color = "white", width = 1, height = 0.9) +
+  scale_fill_manual(values = c("No change" = "gray90", "gold2" = "gold2", "darkblue" = "darkblue", "No data" = "white")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.grid.major.x = element_line(color = "white", size = 0.5),
+    panel.grid.major.y = element_line(color = "white", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(x = "Position", fill = "Amino Acid Change") +
+  scale_x_continuous(
+    breaks = heatmap_data$PositionIndex,
+    labels = heatmap_data$Position,
+    expand = c(0, 0)
+  ) +
+  geom_text(aes(label = DisplayAA, color = TextColor), size = 4, na.rm = TRUE, fontface = "bold") +
+  scale_color_identity() +
+  scale_y_discrete(limits = rev(levels(heatmap_data$mutID)), expand = c(0, 0))
+
+# Apply correct colors to y-axis labels
+Streptococcus.heatmap <- Streptococcus.heatmap +
+  theme(axis.text.y = element_text(color = rev(y_colors$MutantColor))) + 
+  ggtitle("Streptococcus pneumoniae") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+print(Streptococcus.heatmap)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Streptococcus.heatmap.png", 
+       plot=Streptococcus.heatmap,
+       dpi=600, width = 7.5, height = 4.5, units = "in")
+```
+
+Plot the change in fitness across the TMP gradient for both samples:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Streptococcus_long <- Streptococcus_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(TMP, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+Streptococcus_max_fitness <- Streptococcus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join this information back to the original data and color accordingly
+Streptococcus_long <- Streptococcus_long %>%
+  left_join(Streptococcus_max_fitness, by = "mutID") %>%
+  mutate(Color = case_when(
+    mutID == "WP_002205327" ~ "WT",
+    is.na(max_fitness) ~ "Mutant_Unknown",
+    max_fitness < -1 ~ "Mutant_Low",
+    max_fitness >= -1 ~ "Mutant_High"
+  ))
+
+# Reorder the levels of Color factor to plot WT last
+Streptococcus_long$Color <- factor(Streptococcus_long$Color, 
+                                   levels = c("Mutant_Unknown", "Mutant_Low", "Mutant_High", "WT"))
+
+# Separate WT and mutant data
+WT_data <- Streptococcus_long %>% filter(mutID == "WP_002205327")
+mutant_data <- Streptococcus_long %>% filter(mutID != "WP_002205327")
+```
+
+Fitness plotting over the TMP gradient
+```{r}
+# Create the plot
+Streptococcus_plot <- ggplot() +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  # Plot mutant lines first
+  geom_line(data = mutant_data, aes(x = Day, y = Fitness, group = mutID, color = Color), size = 1.0) +
+  geom_point(data = mutant_data, aes(x = Day, y = Fitness, color = Color), size = 3) +
+  # Plot WT line on top
+  geom_line(data = WT_data, aes(x = Day, y = Fitness, group = mutID), color = "red", size = 2.0) +
+  geom_point(data = WT_data, aes(x = Day, y = Fitness), color = "red", size = 3) +
+  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold", "Mutant_Unknown" = "gray")) +
+  scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none") + 
+  ggtitle("Streptococcus pneumoniae") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16)) # Center and italicize the title
+
+# Print the plot
+print(Streptococcus_plot)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Streptococcus.fitness.png", 
+       plot=Streptococcus_plot,
+       dpi=600, width = 4.5, height = 4.5, units = "in")
+```
+
+Plot together:
+```{r}
+patch1 <- Streptococcus_plot | Streptococcus.heatmap
+patch1
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Streptococcus.Both.png", 
+       plot=patch1,
+       dpi=600, width = 11, height = 5, units = "in")
+```
+
+
+### Bacillus cereus
+
+```{r class.output="goodCode"}
+# Filter to retain Escherichia coli (NCBI.species) from L15_homo_mut_good_filtered
+Bacillus <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.species == "Bacillus cereus" & 
+                                            !is.na(L15_homo_mut_good_filtered$NCBI.species), ]
+
+# Filter to only retain specific variants for the MSA
+Bacillus_filtered <- Bacillus %>%
+  filter((mutID == "NP_831957" | ID == "NP_831957") & !is.na(fitD11D03))
+
+# Write the data frame to a CSV file
+write.csv(Bacillus_filtered, "Resistance/Bacillus.fitness.csv", row.names = FALSE)
+
+# Create a function to write FASTA entries
+write_fasta <- function(id, seq, file) {
+  cat(paste0(">", id, "\n"), file = file, append = TRUE)
+  cat(paste0("M", seq, "\n"), file = file, append = TRUE)  # Add "M" at the beginning of the sequence
+}
+
+# Specify the output file name
+Bacillus_output_file <- "Resistance/FASTA/Bacillus.fasta"
+
+# Remove the file if it already exists
+if (file.exists(Bacillus_output_file)) {
+  file.remove(Bacillus_output_file)
+}
+
+# Write the FASTA entries to the file
+for (i in 1:nrow(Bacillus_filtered)) {
+  write_fasta(Bacillus_filtered$mutID[i], Bacillus_filtered$seq[i], Bacillus_output_file)
+}
+
+cat("FASTA file has been generated:", Bacillus_output_file, "\n")
+```
+
+Perform a multiple sequence alignment on the FASTA file using CLUSTAL Omega:
+```{bash}
+# May need to enable permissions to run the executable:
+#chmod +x clustalo
+./Scripts/clustalo -i Resistance/FASTA/Bacillus.fasta -o Resistance/FASTA/Bacillus.aligned.fasta --outfmt=fa --force
+```
+
+Import the MSA file and determine which amino acid positions differ between the samples
+```{r class.output="goodCode"}
+# Import the MSA file
+msa <- readAAMultipleAlignment("Resistance/FASTA/Bacillus.aligned.fasta", format="fasta")
+
+# Convert to a matrix for easier manipulation
+msa_matrix <- as.matrix(msa)
+
+# Set the reference sequence
+ref_seq <- "NP_831957"
+
+cat("Using reference sequence:", ref_seq, "\n")
+
+# Find positions where amino acids differ
+diff_positions <- which(apply(msa_matrix, 2, function(col) length(unique(col)) > 1))
+
+# Create a summary dataframe
+summary_df <- data.frame(
+  Position = diff_positions,
+  RefAA = msa_matrix[ref_seq, diff_positions],
+  stringsAsFactors = FALSE
+)
+
+# Add columns for each unique mutID
+unique_mutIDs <- setdiff(rownames(msa_matrix), ref_seq)
+for (mutID in unique_mutIDs) {
+  summary_df[[mutID]] <- msa_matrix[mutID, diff_positions]
+}
+
+# Add a column for the amino acid changes
+summary_df$Changes <- apply(summary_df, 1, function(row) {
+  changes <- setdiff(as.character(row[3:ncol(summary_df)]), row["RefAA"])
+  if (length(changes) > 0) {
+    paste(row["RefAA"], paste(changes, collapse = "/"), sep = "->")
+  } else {
+    "No change"
+  }
+})
+
+# Remove rows with "No change"
+summary_df <- summary_df[summary_df$Changes != "No change", ]
+
+# Reorder columns
+summary_df <- summary_df %>% 
+  select(Position, RefAA, Changes, everything())
+
+# Print the summary table
+print(summary_df, row.names = FALSE)
+```
+
+Arrange the data for the amino acid mutations heatmap:
+```{r}
+# Get all positions where there's a mutation
+all_positions <- sort(unique(summary_df$Position))
+
+# Reshape the data
+heatmap_data <- summary_df %>%
+  select(-Changes) %>%
+  pivot_longer(cols = -c(Position, RefAA), 
+               names_to = "mutID", 
+               values_to = "AA") %>%
+  mutate(Position = as.numeric(Position))
+
+# Add the reference sequence
+ref_data <- summary_df %>%
+  select(Position, RefAA) %>%
+  mutate(mutID = "NP_831957", AA = RefAA)
+
+heatmap_data <- bind_rows(ref_data, heatmap_data)
+
+# Create a function to compare amino acids
+compare_aa <- function(aa, ref_aa) {
+  ifelse(is.na(aa) | aa == "", "No data",
+         ifelse(aa == ref_aa, "No change", "Mutation"))
+}
+
+# Apply the comparison function and modify AA display
+heatmap_data <- heatmap_data %>%
+  group_by(Position) %>%
+  mutate(
+    Comparison = compare_aa(AA, AA[mutID == "NP_831957"]),
+    DisplayAA = case_when(
+      mutID == "NP_831957" ~ AA,
+      Comparison == "Mutation" ~ AA,
+      TRUE ~ ""
+    )
+  ) %>%
+  ungroup()
+
+# Create a continuous position variable
+heatmap_data <- heatmap_data %>%
+  arrange(Position) %>%
+  mutate(PositionIndex = as.numeric(factor(Position, levels = unique(Position))))
+
+# Create Bacillus_long
+Bacillus_long <- Bacillus_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD")
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+max_fitness <- Bacillus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join max_fitness information and create MutantColor
+heatmap_data <- heatmap_data %>%
+  left_join(max_fitness, by = "mutID") %>%
+  mutate(MutantColor = case_when(
+    mutID == "NP_831957" ~ "red",
+    is.na(max_fitness) ~ "gray",
+    max_fitness < -1 ~ "darkblue",
+    max_fitness >= -1 ~ "gold2"
+  ))
+
+# Create a new column for ordering
+heatmap_data <- heatmap_data %>%
+  mutate(OrderGroup = case_when(
+    mutID == "NP_831957" ~ 1,
+    max_fitness >= -1 ~ 2,
+    max_fitness < -1 ~ 3,
+    TRUE ~ 4  # for any NA or other cases
+  ))
+```
+
+Heatmap for amino acid mutations by position based on reference sequence:
+```{r}
+# Order the data with reference on top
+heatmap_data <- heatmap_data %>%
+  arrange(OrderGroup, desc(max_fitness)) %>%
+  mutate(mutID = factor(mutID, levels = unique(mutID)))
+
+# Ensure the colors are assigned correctly
+y_colors <- heatmap_data %>%
+  distinct(mutID, MutantColor) %>%
+  arrange(match(mutID, levels(heatmap_data$mutID)))
+
+# Modify the heatmap_data to include the color information for mutations and text
+heatmap_data <- heatmap_data %>%
+  mutate(
+    MutationColor = case_when(
+      Comparison == "Mutation" & max_fitness >= -1 ~ "gold2",
+      Comparison == "Mutation" & max_fitness < -1 ~ "darkblue",
+      TRUE ~ Comparison
+    ),
+    TextColor = case_when(
+      MutationColor == "darkblue" ~ "white",
+      TRUE ~ "black"
+    )
+  )
+
+# Create the heatmap
+Bacillus.heatmap <- ggplot(heatmap_data, aes(x = PositionIndex, y = mutID, fill = MutationColor)) +
+  geom_tile(color = "white", width = 1, height = 0.9) +
+  scale_fill_manual(values = c("No change" = "gray90", "gold2" = "gold2", "darkblue" = "darkblue", "No data" = "white")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.grid.major.x = element_line(color = "white", size = 0.5),
+    panel.grid.major.y = element_line(color = "white", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(x = "Position", fill = "Amino Acid Change") +
+  scale_x_continuous(
+    breaks = heatmap_data$PositionIndex,
+    labels = heatmap_data$Position,
+    expand = c(0, 0)
+  ) +
+  geom_text(aes(label = DisplayAA, color = TextColor), size = 6, na.rm = TRUE, fontface = "bold") +
+  scale_color_identity() +
+  scale_y_discrete(limits = rev(levels(heatmap_data$mutID)), expand = c(0, 0))
+
+# Apply correct colors to y-axis labels
+Bacillus.heatmap <- Bacillus.heatmap +
+  theme(axis.text.y = element_text(color = rev(y_colors$MutantColor))) + 
+  ggtitle("Bacillus cereus") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+print(Bacillus.heatmap)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Bacillus.heatmap.png", 
+       plot=Bacillus.heatmap,
+       dpi=600, width = 7.5, height = 4.5, units = "in")
+```
+
+Plot the change in fitness across the TMP gradient for both samples:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Bacillus_long <- Bacillus_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(TMP, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+Bacillus_max_fitness <- Bacillus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join this information back to the original data and color accordingly
+Bacillus_long <- Bacillus_long %>%
+  left_join(Bacillus_max_fitness, by = "mutID") %>%
+  mutate(Color = case_when(
+    mutID == "NP_831957" ~ "WT",
+    is.na(max_fitness) ~ "Mutant_Unknown",
+    max_fitness < -1 ~ "Mutant_Low",
+    max_fitness >= -1 ~ "Mutant_High"
+  ))
+
+# Reorder the levels of Color factor to plot WT last
+Bacillus_long$Color <- factor(Bacillus_long$Color, 
+                                   levels = c("Mutant_Unknown", "Mutant_Low", "Mutant_High", "WT"))
+
+# Separate WT and mutant data
+WT_data <- Bacillus_long %>% filter(mutID == "NP_831957")
+mutant_data <- Bacillus_long %>% filter(mutID != "NP_831957")
+```
+
+Fitness plotting over the TMP gradient
+```{r}
+# First, interpolate NA values
+mutant_data <- mutant_data %>%
+  group_by(mutID) %>%
+  arrange(Day) %>%
+  mutate(Fitness = na.approx(Fitness, x = Day, na.rm = FALSE)) %>%
+  ungroup()
+
+WT_data <- WT_data %>%
+  arrange(Day) %>%
+  mutate(Fitness = na.approx(Fitness, x = Day, na.rm = FALSE))
+
+# Then create the plot
+Bacillus_plot <- ggplot() +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  # Plot mutant lines first
+  geom_line(data = mutant_data, aes(x = Day, y = Fitness, group = mutID, color = Color), size = 1.0) +
+  geom_point(data = mutant_data, aes(x = Day, y = Fitness, color = Color), size = 3) +
+  # Plot WT line on top
+  geom_line(data = WT_data, aes(x = Day, y = Fitness, group = mutID), color = "red", size = 2.0) +
+  geom_point(data = WT_data, aes(x = Day, y = Fitness), color = "red", size = 3) +
+  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold", "Mutant_Unknown" = "gray")) +
+  scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none") + 
+  ggtitle("Bacillus cereus") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+# Print the plot
+print(Bacillus_plot)
+```
+
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Bacillus.fitness.png", 
+       plot=Bacillus_plot,
+       dpi=600, width = 4.5, height = 4.5, units = "in")
+```
+
+Plot together:
+```{r}
+patch2 <- Bacillus_plot | Bacillus.heatmap
+patch2
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Bacillus.Both.png", 
+       plot=patch2,
+       dpi=600, width = 11, height = 5, units = "in")
+```
+
+### Anaerococcus tetradius
+
+```{r class.output="goodCode"}
+# Filter to retain Escherichia coli (NCBI.species) from L15_homo_mut_good_filtered
+Anaerococcus <- L15_homo_mut_good_filtered[L15_homo_mut_good_filtered$NCBI.species == "Anaerococcus tetradius" & 
+                                            !is.na(L15_homo_mut_good_filtered$NCBI.species), ]
+
+# Filter to only retain specific variants for the MSA
+Anaerococcus_filtered <- Anaerococcus %>%
+  filter((mutID == "WP_004836669" | ID == "WP_004836669") & !is.na(fitD11D03))
+
+# Create a function to write FASTA entries
+write_fasta <- function(id, seq, file) {
+  cat(paste0(">", id, "\n"), file = file, append = TRUE)
+  cat(paste0("M", seq, "\n"), file = file, append = TRUE)  # Add "M" at the beginning of the sequence
+}
+
+# Specify the output file name
+Anaerococcus_output_file <- "Resistance/FASTA/Anaerococcus.fasta"
+
+# Remove the file if it already exists
+if (file.exists(Anaerococcus_output_file)) {
+  file.remove(Anaerococcus_output_file)
+}
+
+# Write the FASTA entries to the file
+for (i in 1:nrow(Anaerococcus_filtered)) {
+  write_fasta(Anaerococcus_filtered$mutID[i], Anaerococcus_filtered$seq[i], Anaerococcus_output_file)
+}
+
+cat("FASTA file has been generated:", Anaerococcus_output_file, "\n")
+```
+
+Perform a multiple sequence alignment on the FASTA file using CLUSTAL Omega:
+```{bash}
+# May need to enable permissions to run the executable:
+#chmod +x clustalo
+./Scripts/clustalo -i Resistance/FASTA/Anaerococcus.fasta -o Resistance/FASTA/Anaerococcus.aligned.fasta --outfmt=fa --force
+```
+
+Import the MSA file and determine which amino acid positions differ between the samples
+```{r class.output="goodCode"}
+# Import the MSA file
+msa <- readAAMultipleAlignment("Resistance/FASTA/Anaerococcus.aligned.fasta", format="fasta")
+
+# Convert to a matrix for easier manipulation
+msa_matrix <- as.matrix(msa)
+
+# Set the reference sequence
+ref_seq <- "WP_004836669"
+
+cat("Using reference sequence:", ref_seq, "\n")
+
+# Find positions where amino acids differ
+diff_positions <- which(apply(msa_matrix, 2, function(col) length(unique(col)) > 1))
+
+# Create a summary dataframe
+summary_df <- data.frame(
+  Position = diff_positions,
+  RefAA = msa_matrix[ref_seq, diff_positions],
+  stringsAsFactors = FALSE
+)
+
+# Add columns for each unique mutID
+unique_mutIDs <- setdiff(rownames(msa_matrix), ref_seq)
+for (mutID in unique_mutIDs) {
+  summary_df[[mutID]] <- msa_matrix[mutID, diff_positions]
+}
+
+# Add a column for the amino acid changes
+summary_df$Changes <- apply(summary_df, 1, function(row) {
+  changes <- setdiff(as.character(row[3:ncol(summary_df)]), row["RefAA"])
+  if (length(changes) > 0) {
+    paste(row["RefAA"], paste(changes, collapse = "/"), sep = "->")
+  } else {
+    "No change"
+  }
+})
+
+# Remove rows with "No change"
+summary_df <- summary_df[summary_df$Changes != "No change", ]
+
+# Reorder columns
+summary_df <- summary_df %>% 
+  select(Position, RefAA, Changes, everything())
+
+# Print the summary table
+print(summary_df, row.names = FALSE)
+```
+
+Arrange the data for the amino acid mutations heatmap:
+```{r}
+# Get all positions where there's a mutation
+all_positions <- sort(unique(summary_df$Position))
+
+# Reshape the data
+heatmap_data <- summary_df %>%
+  select(-Changes) %>%
+  pivot_longer(cols = -c(Position, RefAA), 
+               names_to = "mutID", 
+               values_to = "AA") %>%
+  mutate(Position = as.numeric(Position))
+
+# Add the reference sequence
+ref_data <- summary_df %>%
+  select(Position, RefAA) %>%
+  mutate(mutID = "WP_004836669", AA = RefAA)
+
+heatmap_data <- bind_rows(ref_data, heatmap_data)
+
+# Create a function to compare amino acids
+compare_aa <- function(aa, ref_aa) {
+  ifelse(is.na(aa) | aa == "", "No data",
+         ifelse(aa == ref_aa, "No change", "Mutation"))
+}
+
+# Apply the comparison function and modify AA display
+heatmap_data <- heatmap_data %>%
+  group_by(Position) %>%
+  mutate(
+    Comparison = compare_aa(AA, AA[mutID == "WP_004836669"]),
+    DisplayAA = case_when(
+      mutID == "WP_004836669" ~ AA,
+      Comparison == "Mutation" ~ AA,
+      TRUE ~ ""
+    )
+  ) %>%
+  ungroup()
+
+# Create a continuous position variable
+heatmap_data <- heatmap_data %>%
+  arrange(Position) %>%
+  mutate(PositionIndex = as.numeric(factor(Position, levels = unique(Position))))
+
+# Create Anaerococcus_long
+Anaerococcus_long <- Anaerococcus_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD")
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+max_fitness <- Anaerococcus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join max_fitness information and create MutantColor
+heatmap_data <- heatmap_data %>%
+  left_join(max_fitness, by = "mutID") %>%
+  mutate(MutantColor = case_when(
+    mutID == "WP_004836669" ~ "red",
+    is.na(max_fitness) ~ "gray",
+    max_fitness < -1 ~ "darkblue",
+    max_fitness >= -1 ~ "gold2"
+  ))
+
+# Create a new column for ordering
+heatmap_data <- heatmap_data %>%
+  mutate(OrderGroup = case_when(
+    mutID == "WP_004836669" ~ 1,
+    max_fitness >= -1 ~ 2,
+    max_fitness < -1 ~ 3,
+    TRUE ~ 4  # for any NA or other cases
+  ))
+```
+
+Heatmap for amino acid mutations by position based on reference sequence:
+```{r}
+# Order the data with reference on top
+heatmap_data <- heatmap_data %>%
+  arrange(OrderGroup, desc(max_fitness)) %>%
+  mutate(mutID = factor(mutID, levels = unique(mutID)))
+
+# Ensure the colors are assigned correctly
+y_colors <- heatmap_data %>%
+  distinct(mutID, MutantColor) %>%
+  arrange(match(mutID, levels(heatmap_data$mutID)))
+
+# Modify the heatmap_data to include the color information for mutations and text
+heatmap_data <- heatmap_data %>%
+  mutate(
+    MutationColor = case_when(
+      Comparison == "Mutation" & max_fitness >= -1 ~ "gold2",
+      Comparison == "Mutation" & max_fitness < -1 ~ "darkblue",
+      TRUE ~ Comparison
+    ),
+    TextColor = case_when(
+      MutationColor == "darkblue" ~ "white",
+      TRUE ~ "black"
+    )
+  )
+
+# Create the heatmap
+Anaerococcus.heatmap <- ggplot(heatmap_data, aes(x = PositionIndex, y = mutID, fill = MutationColor)) +
+  geom_tile(color = "white", width = 1, height = 0.9) +
+  scale_fill_manual(values = c("No change" = "gray90", "gold2" = "gold2", "darkblue" = "darkblue", "No data" = "white")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.grid.major.x = element_line(color = "white", size = 0.5),
+    panel.grid.major.y = element_line(color = "white", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(x = "Position", fill = "Amino Acid Change") +
+  scale_x_continuous(
+    breaks = heatmap_data$PositionIndex,
+    labels = heatmap_data$Position,
+    expand = c(0, 0)
+  ) +
+  geom_text(aes(label = DisplayAA, color = TextColor), size = 5, na.rm = TRUE, fontface = "bold") +
+  scale_color_identity() +
+  scale_y_discrete(limits = rev(levels(heatmap_data$mutID)), expand = c(0, 0))
+
+# Apply correct colors to y-axis labels
+Anaerococcus.heatmap <- Anaerococcus.heatmap +
+  theme(axis.text.y = element_text(color = rev(y_colors$MutantColor))) + 
+  ggtitle("Anaerococcus tetradius") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+print(Anaerococcus.heatmap)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Anaerococcus.heatmap.png", 
+       plot=Anaerococcus.heatmap,
+       dpi=600, width = 7.5, height = 4.5, units = "in")
+```
+
+Plot the change in fitness across the TMP gradient for both samples:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Anaerococcus_long <- Anaerococcus_filtered %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(TMP, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+Anaerococcus_max_fitness <- Anaerococcus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join this information back to the original data and color accordingly
+Anaerococcus_long <- Anaerococcus_long %>%
+  left_join(Anaerococcus_max_fitness, by = "mutID") %>%
+  mutate(Color = case_when(
+    mutID == "WP_004836669" ~ "WT",
+    is.na(max_fitness) ~ "Mutant_Unknown",
+    max_fitness < -1 ~ "Mutant_Low",
+    max_fitness >= -1 ~ "Mutant_High"
+  ))
+
+# Reorder the levels of Color factor to plot WT last
+Anaerococcus_long$Color <- factor(Anaerococcus_long$Color, 
+                                   levels = c("Mutant_Unknown", "Mutant_Low", "Mutant_High", "WT"))
+
+# Separate WT and mutant data
+WT_data <- Anaerococcus_long %>% filter(mutID == "WP_004836669")
+mutant_data <- Anaerococcus_long %>% filter(mutID != "WP_004836669")
+```
+
+Fitness plotting over the TMP gradient
+```{r}
+# Create the plot
+Anaerococcus_plot <- ggplot() +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  # Plot mutant lines first
+  geom_line(data = mutant_data, aes(x = Day, y = Fitness, group = mutID, color = Color), size = 1.0) +
+  geom_point(data = mutant_data, aes(x = Day, y = Fitness, color = Color), size = 3) +
+  # Plot WT line on top
+  geom_line(data = WT_data, aes(x = Day, y = Fitness, group = mutID), color = "red", size = 2.0) +
+  geom_point(data = WT_data, aes(x = Day, y = Fitness), color = "red", size = 3) +
+  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold", "Mutant_Unknown" = "gray")) +
+  scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none") + 
+  ggtitle("Anaerococcus tetradius") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16)) # Center and italicize the title
+
+# Print the plot
+print(Anaerococcus_plot)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Anaerococcus.fitness.png", 
+       plot=Anaerococcus_plot,
+       dpi=600, width = 4.5, height = 4.5, units = "in")
+```
+
+Plot together:
+```{r warning=FALSE}
+patch3 <- Anaerococcus_plot | Anaerococcus.heatmap
+patch3
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Anaerococcus.Both.png", 
+       plot=patch3,
+       dpi=600, width = 11, height = 5, units = "in")
+```
+
+Full plot with Bacillus and Streptococcus taxa:
+```{r warning=FALSE}
+patch7 <- (Bacillus_plot | Bacillus.heatmap) / 
+          (Streptococcus_plot | Streptococcus.heatmap) +
+  plot_annotation(tag_levels = 'A') &
+  theme(plot.tag = element_text(size = 18, face = "bold"))
+patch7
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Two.Taxa.All.png", 
+       plot=patch7,
+       dpi=600, width = 12, height = 10, units = "in")
+```
+
+Full plot with all three taxa:
+```{r warning=FALSE}
+patch4 <- (Streptococcus_plot | Streptococcus.heatmap) / 
+          (Bacillus_plot | Bacillus.heatmap) / 
+          (Anaerococcus_plot | Anaerococcus.heatmap) +
+  plot_annotation(tag_levels = 'A') &
+  theme(plot.tag = element_text(size = 18, face = "bold"))
+patch4
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Three.Taxa.All.png", 
+       plot=patch4,
+       dpi=600, width = 11, height = 12, units = "in")
+```
+
+Full plot with FOUR taxa:
+```{r warning=FALSE}
+patch5 <- (pathogenic_plot | Escherichia_plot) /
+          (Bacillus_plot | Bacillus.heatmap) /
+          (Streptococcus_plot | Streptococcus.heatmap) +
+  plot_layout(heights = c(3, 3, 4)) +
+  plot_annotation(tag_levels = 'A')
+
+patch5 <- patch5 & 
+  theme(plot.tag = element_text(size = 24, face = "bold"))
+
+patch5
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Four.Taxa.All.png", 
+       plot=patch5,
+       dpi=600, width = 10, height = 12, units = "in")
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Four.Taxa.All.v2.png", 
+       plot=patch5,
+       dpi=600, width = 15, height = 14, units = "in")
+```
+
+Full plot with all five taxa:
+```{r warning=FALSE}
+patch6 <- (pathogenic_plot | Escherichia_plot) /
+          (Bacillus_plot | Bacillus.heatmap) / 
+          (Anaerococcus_plot | Anaerococcus.heatmap) /
+          (Streptococcus_plot | Streptococcus.heatmap) + 
+  plot_layout(heights = c(3, 4, 4, 4)) +
+  plot_annotation(tag_levels = 'A')
+
+patch6 <- patch6 & 
+  theme(plot.tag = element_text(size = 24, face = "bold"))
+
+patch6
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Five.Taxa.All.png", 
+       plot=patch6,
+       dpi=600, width = 10, height = 15, units = "in")
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
