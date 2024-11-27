@@ -1,0 +1,875 @@
+---
+title: "Dialout Variant Fitness Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "broom", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "lubridate", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "readxl", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Import Data Files
+
+Import **COUNT** files generated from [DHFR.2.Counts.RMD](https://github.com/PlesaLab/DHFR) relevant for downstream analysis.
+```{r}
+# BCcontrols_15_median
+BCcontrols_15_median <- read.csv("Count/count_files_formatted/BCcontrols_15_median.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+Import **PERFECTS** files generated from [DHFR.3.Perfects.RMD](https://github.com/PlesaLab/DHFR) relevant for downstream analysis.
+```{r}
+# perfects15_5BCs
+perfects15_5BCs <- read.csv("Perfects/perfects_files_formatted/perfects15_5BCs.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+# Dialout Analysis
+
+## Import Excel Files
+
+This is the file with the plate reader data:
+```{r}
+# REPLACE THIS FILE NAME FOR EACH ANALYSIS
+filename_of_plate_reader_data = "Dialout/RAW/02-08-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate4.Rnd2.xlsx"
+
+#M9-Full Plate 1: "01-24-24_KR_DHFR_Fitness_Assay_M9_Full_Supp.Plate1.xlsx"
+#M9-TMP Plate 2: "01-31-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate2.xlsx"
+#M9-TMP Plate 3: "02-01-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate3.xlsx"
+#M9-TMP Plate 4: "02-02-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate4.xlsx"
+
+#Re-do of M9-TMP Plates:
+#M9-TMP Plate 2: "02-06-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate2.Rnd2.xlsx"
+#M9-TMP Plate 3: "02-07-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate3.Rnd2.xlsx"
+#M9-TMP Plate 4: "02-08-24_KR_DHFR_Fitness_Assay_M9_TMP.Plate4.Rnd2.xlsx"
+```
+
+This is the range of data in the excel file to import
+```{r}
+# UPDATE THIS DATA RANGE FOR EACH EXCEL FILE YOU IMPORT
+range_od = "B41:CI282"
+
+#M9-Full Plate 1 OD-range: B41:AM282
+#M9-TMP Plate 2 OD-range: B41:CI276
+#M9-TMP Plate 3 OD-range: B41:CI279
+#M9-TMP Plate 4 OD-range: B41:CI282
+
+#Re-do of M9-TMP Plates:
+#M9-TMP Plate 2 OD-range: B41:CI282
+#M9-TMP Plate 3 OD-range: B41:CI276
+#M9-TMP Plate 4 OD-range: B41:CI282
+```
+
+```{r}
+#get the data
+od_data1 <- as.data.frame(read_excel(filename_of_plate_reader_data, sheet = 1, range = range_od))
+```
+
+```{r}
+#fix the time (makes minutes from start)
+od_data <- od_data1 %>%
+  mutate(time_int=as.duration(interval(start = od_data1$Time[1], end=Time))) %>%
+  mutate(round_time=ceiling(as.numeric(time_int)/60)) %>%
+  subset(select = -Time) %>%
+  subset(select = -time_int) %>%
+  relocate(round_time) %>%
+  dplyr::rename(Time=round_time) %>%
+  t() %>%
+  as.data.frame(.)
+```
+
+```{r}
+#make vector variables for plotting
+M = nrow(od_data)
+N = ncol(od_data)
+```
+
+```{r}
+#make a vector of your time points
+ODtime <- od_data[1,1:N]
+```
+
+## Sample Growth Rate Plots
+
+This command loads the script (find_gr.R) that contains the analysis functions. This file needs to be in the present working directory.
+```{r}
+source("Dialout/Scripts/find_gr.R")
+```
+
+```{r}
+#define initial growth rates
+growth.rates = NULL
+```
+
+```{r}
+#this variable will store all the data
+gr_table <- data.frame(sample_name=character(), 
+                       doubling.time=double(), 
+                       m=double(),
+                       r2=double(),
+                       lag.t=double())
+```
+
+```{r}
+#convert time_vector to numeric variable
+time_vector = as.numeric(ODtime[1,])
+```
+
+Generate growth rate plots from each sampling well and save as .png files:
+```{r}
+#run through all samples and fit
+for (i in 2:M) {
+  print(i)
+  sample_nm <- row.names(od_data)[i]
+  
+  # Clean the sample name to remove or replace problematic characters
+  clean_sample_nm <- gsub("[^[:alnum:]_-]", "_", sample_nm)
+  
+  # Open a PNG device with the cleaned filename
+  png_filename <- file.path("Dialout/PLOTS", paste0(clean_sample_nm, "_growth_rate_plot.png"))
+  png(filename = png_filename, width = 800, height = 600)
+  
+  #this is where the fit happens:
+  gr <- findgr(od_data[i, 1:N], time_vector, sample_nm, int=30, r2=0.6) 
+  
+  de <- list(sample_name=sample_nm, 
+             doubling.time=log2(2)/gr["m"], 
+             m=gr["m"],
+             r2=gr["r2"],
+             lag.t=gr["lag.t"])
+  
+  #add this to previously calculated wells
+  gr_table <- rbind(gr_table, de, stringsAsFactors=FALSE)
+  growth.rates <- rbind(growth.rates, gr)
+  
+  # Close the PNG device
+  dev.off()
+}
+```
+
+Display the plots in the RMD:
+```{r class.output="goodCode"}
+#run through all samples and fit
+for (i in 2:M) {
+  print(i)
+  sample_nm=row.names(od_data)[i]
+  
+  #this is where the fit happens:
+  gr <- findgr(od_data[i, 1:N], time_vector, sample_nm, int=30, r2=0.6) 
+  #1 in od_data[i, 1:N] is the column number where the data starts;  
+  #int is number of points taken at one time as an interval to find the highest slope; 
+  #vary (i.e. lower) r2, i.e. rsquared as needed, blanks can be a problem here
+  
+  #print(gr["m"])
+  de <- list(sample_name=sample_nm, 
+             doubling.time=log2(2)/gr["m"], 
+             m=gr["m"],
+             r2=gr["r2"],
+             lag.t=gr["lag.t"])
+  #print(de)
+  
+  #add this to previously calculated wells
+  gr_table = rbind(gr_table,de, stringsAsFactors=FALSE)
+  growth.rates <- rbind(growth.rates, gr)
+}
+
+dev.off()
+```
+
+Write the data to a file
+```{r}
+# UPDATE THE TABLE NAME IF YOU RE-RUN MULTIPLE EXCEL FILES
+
+# Substitute your desired file name for 'growth_rates'
+write.table(gr_table, "Dialout/OUTPUT/growth_rates_plate4.txt", sep="\t", quote=F, row.names=F) 
+```
+
+## Full Growth Rate Plot
+
+Load the final fitness data for all 12 Dialout samples based on calculated growth rates:
+```{r}
+# For 12 samples (including WT and mCherry controls)
+grwell <- read.table(file = 'Dialout/Raw/growth_rates_all.v2.csv', sep =',', header = TRUE)
+```
+
+Reshape the data for plotting:
+```{r}
+# Convert Construct to a factor with desired levels
+grwell$Media <- factor(grwell$Media, levels = c("M9-Supp", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp"))
+
+# Define the 12 samples
+grwell$Construct <- factor(grwell$Construct, levels = c("NP_267306", "WP_000637209", "WP_008976421",
+                                                        "WP_003776922", "WP_008578924", "WP_002897636",
+                                                        "WP_000162453", "WP_003012456", "WP_000162462",
+                                                        "WP_003027976", "WT-DHFR", "mCherry"))
+```
+
+Growth Rate Plot for DHFR Dialout Variants:
+```{r}
+# Convert Media to a factor with desired levels
+grwell$Media <- factor(grwell$Media, levels = c("M9-Supp", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp"))
+
+# Define the 12 samples in the desired order
+construct_order <- c("NP_267306", "WP_000637209", "WP_008976421", "WP_003776922", "WP_008578924", "WP_002897636", "WP_000162453", "WP_003012456", "WP_000162462", "WP_003027976", "WT-DHFR", "mCherry")
+
+grwell$Construct <- factor(grwell$Construct, levels = construct_order)
+
+# Create a named vector for facet colors
+facet_colors <- setNames(c(rep("lightgray", 10), "blue", "red"), construct_order)
+
+# Custom function to reorder facets
+reorder_facets <- function(x) factor(x, levels = construct_order)
+
+# Calculate the overall y-axis range
+y_min <- min(grwell$m, na.rm = TRUE)
+y_max <- max(grwell$m, na.rm = TRUE)
+
+# Calculate mean growth rate for each Construct-Media combination
+grwell_mean <- grwell %>%
+  group_by(Construct, Media) %>%
+  summarize(mean_m = mean(m, na.rm = TRUE), .groups = "drop")
+```
+
+Growth Rate Plot
+```{r}
+# Growth rate plot
+fitness.plot.v3 <- ggplot(grwell_mean, aes(x = Media, y = mean_m, group = Construct)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Growth Rate Assay for DHFR Dial-Out Variants") +
+  facet_wrap(~ reorder_facets(Construct), scales = "fixed", ncol = 4) +
+  theme_cowplot(16) +
+  theme(
+    title = element_text(color = "black", face = "bold", size=14),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size=10),
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", face = "bold", size=10),
+    panel.spacing = unit(0.5, "lines"),
+    axis.text.y = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.position = "none"
+  ) +
+  ylab(expression("Mean Growth Rate (min"^"-1"*")")) +
+  xlab("Media") +
+  coord_cartesian(ylim = c(y_min, y_max))
+
+# Add colored backgrounds for all facets
+fitness.plot.v3 <- fitness.plot.v3 +
+  geom_rect(data = data.frame(Construct = construct_order),
+            aes(fill = Construct),
+            xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf,
+            alpha = 0.2, inherit.aes = FALSE) +
+  scale_fill_manual(values = facet_colors, guide = "none")
+
+# Remove y-axis labels for all but the left-most facets
+fitness.plot.v3 <- fitness.plot.v3 +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y.left = element_text(size = 10),
+    axis.ticks.y.left = element_line(),
+    strip.text.x = element_text(size = 10, margin = margin(b = 5, t = 5))
+  )
+
+# Print the plot
+print(fitness.plot.v3)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Growth_Rates.pdf", 
+       plot = fitness.plot.v3, 
+       dpi=600, width = 6, height = 6, units = "in")
+```
+
+Calculate a Mean growth rate value at each TMP concentration for each dialout variant:
+```{r class.output="goodCode"}
+# Create the summary table
+grwell_summary <- grwell_mean %>%
+  pivot_wider(
+    names_from = Media,
+    values_from = mean_m
+  ) %>%
+  select(Construct, `M9-Supp`, `0-tmp`, `0.058-tmp`, `0.5-tmp`, `1.0-tmp`, `10-tmp`, `50-tmp`, `200-tmp`) %>%
+  arrange(factor(Construct, levels = construct_order))
+
+# Round all numeric columns to 6 decimal places
+grwell_summary <- grwell_summary %>%
+  mutate(across(where(is.numeric), ~round(., 6)))
+
+# Display the table
+kable(grwell_summary, format = "markdown", caption = "Summary of Mean Growth Rates (1/min) for DHFR Variants")
+```
+
+## Dialout Variant Fitness
+
+```{r echo=FALSE}
+# Reload BCcontrols_15_median
+BCcontrols_15_median <- read.csv("Count/count_files_formatted/BCcontrols_15_median.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+
+# Re-load perfects15_5BCs
+perfects15_5BCs <- read.csv("Perfects/perfects_files_formatted/perfects15_5BCs.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+Start by pulling out the Dialout variants from the perfects15_5BCs dataset:
+```{r}
+# Specify the mutID values you want to keep
+dialout_mutIDs <- c("NP_267306", "WP_000637209", "WP_008976421", "WP_003776922", "WP_008578924",
+                    "WP_002897636", "WP_000162453", "WP_003012456", "WP_000162462", "WP_003027976")
+
+# Subset the dataframe, keeping only columns 1:9
+dialout_perfects15_5BCs <- perfects15_5BCs[perfects15_5BCs$mutID %in% dialout_mutIDs, 1:9]
+
+# Rename the columns
+colnames(dialout_perfects15_5BCs) <- c("mutID","M9-Supp", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")
+```
+
+Add the Controls fitness to the Dialout fitness dataset:
+```{r}
+# Rename controls columns
+colnames(BCcontrols_15_median) <- c("mutID", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")
+
+# First, add the M9-Supp column with NA values to BCcontrols_15_median
+BCcontrols_15_median <- BCcontrols_15_median %>%
+  mutate(`M9-Supp` = NA)
+
+# Now merge the two dataframes
+dialout_ctrls_fitness <- bind_rows(
+  dialout_perfects15_5BCs,
+  BCcontrols_15_median)
+
+# Reorder columns to match the original order
+column_order <- c("mutID", "M9-Supp", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")
+dialout_ctrls_fitness <- dialout_ctrls_fitness %>%
+  select(all_of(column_order))
+
+# Remove the row where mutID is "D27N"
+dialout_ctrls_fitness <- dialout_ctrls_fitness %>%
+  filter(mutID != "D27N")
+
+# Rename "WT" to "WT-DHFR"
+dialout_ctrls_fitness <- dialout_ctrls_fitness %>%
+  mutate(mutID = ifelse(mutID == "WT", "WT-DHFR", mutID))
+
+# Round all numeric columns to 6 decimal places
+dialout_ctrls_fitness_summary <- dialout_ctrls_fitness %>%
+  mutate(across(where(is.numeric), ~round(., 6)))
+
+# Display the table
+kable(dialout_ctrls_fitness_summary, format = "markdown", caption = "Summary of Median Fitness for Pooled DHFR Variants")
+```
+
+### Fitness Plot
+
+Reshape data prior to plotting
+```{r}
+# Reshape the data from wide to long format
+long_data <- dialout_ctrls_fitness %>%
+  pivot_longer(
+    cols = c("M9-Supp", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp"),
+    names_to = "Media",
+    values_to = "fitness"
+  )
+
+# Convert Media to a factor with desired levels
+long_data$Media <- factor(long_data$Media, levels = c("M9-Supp", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp"))
+
+# Define the 12 samples in the desired order
+construct_order <- c("NP_267306", "WP_000637209", "WP_008976421", "WP_003776922", "WP_008578924", "WP_002897636", "WP_000162453", "WP_003012456", "WP_000162462", "WP_003027976", "WT-DHFR", "mCherry")
+
+long_data$mutID <- factor(long_data$mutID, levels = construct_order)
+
+# Create a named vector for facet colors
+facet_colors <- setNames(c(rep("lightgray", 10), "blue", "red"), construct_order)
+
+# Custom function to reorder facets
+reorder_facets <- function(x) factor(x, levels = construct_order)
+
+# Calculate the overall y-axis range
+y_min <- min(long_data$fitness, na.rm = TRUE)
+y_max <- max(long_data$fitness, na.rm = TRUE)
+```
+
+Plot the fitness values across the TMP gradient for each dialout variant:
+```{r warning=FALSE}
+# Fitness plot
+fitness.plot.v4 <- ggplot(long_data, aes(x = Media, y = fitness, group = mutID)) +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "red", size = 0.5) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Pooled Fitness Assay for DHFR Dial-Out Variants") +
+  facet_wrap(~ reorder_facets(mutID), scales = "fixed", ncol = 4) +
+  theme_cowplot(16) +
+  theme(
+    title = element_text(color = "black", face = "bold", size=14),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size=10),
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", face = "bold", size=10),
+    panel.spacing = unit(0.5, "lines"),
+    axis.text.y = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.position = "none"
+  ) +
+  ylab("Median Fitness (LogFC)") +
+  xlab("Media") +
+  coord_cartesian(ylim = c(y_min, y_max))
+
+# Add colored backgrounds for all facets
+fitness.plot.v4 <- fitness.plot.v4 +
+  geom_rect(data = data.frame(mutID = construct_order),
+            aes(fill = mutID),
+            xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf,
+            alpha = 0.2, inherit.aes = FALSE) +
+  scale_fill_manual(values = facet_colors, guide = "none")
+
+# Remove y-axis labels for all but the left-most facets
+fitness.plot.v4 <- fitness.plot.v4 +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y.left = element_text(size = 10),
+    axis.ticks.y.left = element_line(),
+    strip.text.x = element_text(size = 10, margin = margin(b = 5, t = 5))
+  )
+
+# Print the plot
+print(fitness.plot.v4)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Median_Fitness.pdf",
+       plot = fitness.plot.v4, 
+       dpi=600, width = 6, height = 6, units = "in")
+```
+
+Plot Fitness and Growth Rates side-by-side
+```{r warning=FALSE}
+patch1 <- fitness.plot.v4 | fitness.plot.v3
+patch1
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Growth_Rate_Fitness_Comparison.pdf",
+       plot = patch1, 
+       dpi=600, width = 12, height = 6, units = "in")
+```
+
+Combined Datasets for Plotting Together
+```{r class.output="goodCode"}
+# Prepare long_data (Fitness data)
+long_data_renamed <- long_data %>%
+  rename(Construct = mutID, value = fitness) %>%
+  mutate(assay_type = "Fitness")
+
+# Check the range of Fitness values
+print("Range of Fitness values:")
+print(range(long_data_renamed$value, na.rm = TRUE))
+
+# Prepare grwell_mean data (Growth Rate data)
+grwell_mean_prepared <- grwell_mean %>%
+  rename(value = mean_m) %>%
+  mutate(
+    Type = case_when(
+      Construct %in% c("WT-DHFR", "mCherry") ~ "Control",
+      TRUE ~ "Variant"
+    ),
+    assay_type = "Growth Rate"
+  )
+```
+
+```{r class.output="goodCode"}
+# Combine the datasets
+combined_data <- bind_rows(long_data_renamed, grwell_mean_prepared)
+
+# Verify the data
+print("Combined data summary:")
+print(table(combined_data$assay_type, combined_data$Type, useNA = "ifany"))
+
+# Check for any extreme values or outliers
+print("Summary of 'value' column:")
+print(summary(combined_data$value))
+
+# Create the combined plot
+combined_plot <- ggplot(combined_data, aes(x = Media, y = value, group = interaction(Construct, assay_type), color = assay_type)) +
+  geom_point() +
+  geom_line() +
+  geom_hline(data = filter(combined_data, assay_type == "Fitness"), 
+             aes(yintercept = -1), linetype = "dashed", color = "red", size = 0.5) +
+  facet_grid(assay_type ~ reorder_facets(Construct), scales = "free_y") +
+  theme_cowplot(16) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", face = "bold", size = 10),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),
+    panel.spacing = unit(0.5, "lines"),
+    axis.text.y = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.position = "none"
+  ) +
+  labs(title = "Growth Rate and Pooled Fitness Assays for DHFR Dial-Out Variants",
+       x = "Media",
+       y = "Value") +
+  scale_color_manual(values = c("Fitness" = "blue", "Growth Rate" = "red"))
+
+# Add colored backgrounds for all facets
+combined_plot <- combined_plot +
+  geom_rect(data = data.frame(Construct = construct_order),
+            aes(fill = Construct),
+            xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf,
+            alpha = 0.2, inherit.aes = FALSE) +
+  scale_fill_manual(values = facet_colors, guide = "none")
+
+# Print the plot
+print(combined_plot)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Fitness_Growth_Stacked_Plots.pdf",
+       plot = combined_plot, 
+       dpi=600, width = 16, height = 4, units = "in")
+```
+
+Plot data together with separate y-axes
+```{r class.output="goodCode"}
+# Function to create a dual-axis plot for each Construct
+create_dual_axis_plot <- function(data, construct) {
+  # Remove M9-Supp media for mCherry and WT-DHFR
+  if (construct %in% c("mCherry", "WT-DHFR")) {
+    data <- data %>% filter(!(Media == "M9-Supp"))
+  }
+  
+  fitness_data <- filter(data, assay_type == "Fitness")
+  growth_rate_data <- filter(data, assay_type == "Growth Rate")
+  
+  # Calculate the ratio for the secondary axis
+  ratio <- diff(range(fitness_data$value)) / diff(range(growth_rate_data$value))
+  
+  ggplot() +
+    # Fitness data
+    geom_line(data = fitness_data, aes(x = Media, y = value, group = 1), color = "blue") +
+    geom_point(data = fitness_data, aes(x = Media, y = value), color = "blue") +
+    # Growth Rate data
+    geom_line(data = growth_rate_data, aes(x = Media, y = value * ratio, group = 1), color = "red") +
+    geom_point(data = growth_rate_data, aes(x = Media, y = value * ratio), color = "red") +
+    # Horizontal line at y = -1 for Fitness
+    geom_hline(yintercept = -1, linetype = "dashed", color = "gray", size = 0.5) +
+    # Axes and labels
+    scale_y_continuous(
+      name = "Fitness",
+      sec.axis = sec_axis(~./ratio, name = "Growth Rate")
+    ) +
+    theme_classic() +
+    theme(
+      axis.line.y.right = element_line(color = "red"),
+      axis.ticks.y.right = element_line(color = "red"),
+      axis.text.y.right = element_text(color = "red"),
+      axis.title.y.right = element_text(color = "red"),
+      axis.line.y.left = element_line(color = "blue"),
+      axis.ticks.y.left = element_line(color = "blue"),
+      axis.text.y.left = element_text(color = "blue"),
+      axis.title.y.left = element_text(color = "blue"),
+      axis.text.x = element_text(angle=45, hjust=1),
+      axis.title.x = element_blank(),
+      plot.title = element_text(size=10, face="bold", hjust=0.5)
+    ) +
+    labs(title=paste(construct),
+         x="Media")
+}
+
+# Generate a list of plots, one for each Construct
+plot_list <- combined_data %>%
+  group_by(Construct) %>%
+  group_map(~ create_dual_axis_plot(.x, .y$Construct))
+
+# Arrange all plots in a grid
+grid_plot <- do.call(grid.arrange, c(plot_list, ncol=3))
+
+# Print the grid plot
+print(grid_plot)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Fitness_Growth_Combined_Plots.pdf",
+       plot = grid_plot, 
+       dpi=600, width = 10, height = 10, units = "in")
+```
+
+### Correlations
+
+```{r class.output="goodCode"}
+# First, let's reshape the data to have Fitness and Growth Rate side by side
+wide_data <- combined_data %>%
+  select(Construct, Media, assay_type, value) %>%
+  pivot_wider(names_from = assay_type, values_from = value) %>%
+  filter(!is.na(Fitness) & !is.na(`Growth Rate`))
+
+# Function to calculate Spearman correlation and p-value
+spearman_cor <- function(data) {
+  cor_test <- cor.test(data$Fitness, data$`Growth Rate`, method = "spearman")
+  tibble(
+    correlation = cor_test$estimate,
+    p_value = cor_test$p.value
+  )
+}
+
+# Calculate correlations for each Media type
+correlations <- wide_data %>%
+  group_by(Media) %>%
+  do(spearman_cor(.)) %>%
+  ungroup()
+
+# Print the results
+print(correlations)
+
+# Optionally, create a plot to visualize the correlations
+correlation_plot <- ggplot(correlations, aes(x = Media, y = correlation)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_text(aes(label = sprintf("%.3f", correlation), 
+                y = ifelse(correlation > 0, correlation + 0.05, correlation - 0.05)),
+            vjust = ifelse(correlations$correlation > 0, 0, 1)) +
+  geom_text(aes(label = sprintf("p = %.3f", p_value), y = 0), 
+            vjust = ifelse(correlations$correlation > 0, 1.5, -0.5)) +
+  theme_classic() +  # This removes the background grid and adds axis lines
+  theme(
+    axis.line = element_line(color = "black"),  # Ensure axis lines are black
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank()   # Remove minor grid lines
+  ) +
+  labs(title = "Spearman Correlations between Fitness and Growth Rate by Media",
+       y = "Correlation Coefficient")
+
+print(correlation_plot)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Spearman_Correlations_Barplot.pdf",
+       plot = correlation_plot, 
+       dpi=600, width = 8, height = 4, units = "in")
+```
+
+```{r class.output="goodCode"}
+# Function to create a scatter plot for each media type
+create_scatter_plot <- function(data, media_type) {
+  # Remove rows where Construct is "mCherry"
+  data <- data %>% filter(Construct != "mCherry")
+  
+  # Perform Spearman correlation test
+  cor_test <- cor.test(data$Fitness, data$`Growth Rate`, method = "spearman")
+  
+  ggplot(data, aes(x = `Growth Rate`, y = Fitness)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", color = "red", fill = "skyblue", se = TRUE) +  # Set se = TRUE to include confidence interval
+    annotate("text", x = min(data$`Growth Rate`, na.rm = TRUE), y = max(data$Fitness, na.rm = TRUE),
+             label = sprintf("Correlation = %.2f\np-value = %.3f", cor_test$estimate, cor_test$p.value),
+             hjust = 0, vjust = 1) +
+    theme_classic() +  # This removes the background grid and adds axis lines
+    theme(
+      axis.line = element_line(color = "black"),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 10),
+      plot.margin = margin(10, 30, 10, 10)  # Add right margin for x-axis labels
+    ) +
+    labs(
+      title = NULL,  # Remove the title
+      x = paste("Growth Rate in", media_type),  # Set x-axis title
+      y = paste("Fitness in", media_type)        # Set y-axis title
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))  # Add padding to x-axis limits
+}
+
+# Generate a list of plots, one for each media type
+corr_plot_list <- wide_data %>%
+  group_by(Media) %>%
+  group_map(~ create_scatter_plot(.x, .y$Media))
+
+# Arrange all plots in a grid
+corr_grid_plot <- do.call(grid.arrange, c(corr_plot_list, ncol = 2))
+
+# Print the grid plot
+print(corr_grid_plot)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Spearman_Correlations.pdf",
+       plot = corr_grid_plot, 
+       dpi=600, width = 8, height = 10, units = "in")
+```
+
+```{r class.output="goodCode"}
+# Function to create a scatter plot for each media type
+create_scatter_plot <- function(data, media_type) {
+  # Remove rows where Construct is "mCherry"
+  data <- data %>% filter(Construct != "mCherry")
+  
+  # Perform Spearman correlation test (if needed for other purposes)
+  cor_test <- cor.test(data$Fitness, data$`Growth Rate`, method = "spearman")
+  
+  ggplot(data, aes(x = `Growth Rate`, y = Fitness)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", color = "red", fill = "skyblue", se = TRUE) +  # Set fill color for confidence interval to blue
+    theme_classic() + 
+    theme(
+      axis.line = element_line(color = "black"),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 10),
+      plot.margin = margin(10, 30, 10, 10)
+    ) +
+    labs(
+      title = NULL,
+      x = paste("Growth Rate in", media_type),  # Set x-axis title
+      y = paste("Fitness in", media_type)        # Set y-axis title
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))  
+}
+
+# Generate a list of plots, one for each media type
+corr_plot_list <- wide_data %>%
+  group_by(Media) %>%
+  group_map(~ create_scatter_plot(.x, .y$Media))
+
+# Arrange all plots in a grid
+corr_grid_plot <- do.call(grid.arrange, c(corr_plot_list, ncol = 2))
+
+# Print the grid plot
+print(corr_grid_plot)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Dialout_Spearman_Correlations.no.labels.pdf",
+       plot = corr_grid_plot, 
+       dpi=600, width = 8, height = 9, units = "in")
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
