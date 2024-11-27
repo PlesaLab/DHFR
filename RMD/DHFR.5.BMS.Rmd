@@ -1,0 +1,1508 @@
+---
+title: "Broad Mutational Scanning Analysis"
+author: 'Authors: [Karl J. Romanowicz](https://kromanowicz.github.io/), Carmen Resnick, Samuel R. Hinton, Calin Plesa'
+output:
+  html_notebook:
+    theme: spacelab
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    toc: yes
+    toc_depth: '5'
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+
+**Preprint (biorXiv):** []()
+
+**GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
+
+**NCBI BioProject:** [https://www.ncbi.nlm.nih.gov/bioproject/1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478)
+
+# Experiment
+
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+
+![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
+
+```{css}
+.badCode {
+background-color: lightpink;
+font-weight: bold;
+}
+
+.goodCode {
+background-color: lightgreen;
+font-weight: bold;
+}
+
+.sharedCode {
+background-color: lightblue;
+font-weight: bold;
+}
+
+table {
+  margin: auto;
+  border-top: 1px solid #666;
+  border-bottom: 1px solid #666;
+}
+table thead th { border-bottom: 1px solid #ddd; }
+th, td { padding: 5px; }
+thead, tfoot, tr:nth-child(even) { background: #eee; }
+```
+
+```{r setup, include=FALSE}
+# Set global options for notebook
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = TRUE, class.source = "bg-success")
+
+# Getting the path of your current open file and set as wd
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+# Packages
+The following R packages must be installed prior to loading into the R session. See the **Reproducibility** tab for a complete list of packages and their versions used in this workflow.
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Load the latest version of python (3.10.14) for downstream use:
+library(reticulate)
+use_python("/Users/krom/miniforge3/bin/python3")
+
+# Make a vector of required packages
+required.packages <- c("ape", "bio3d", "Biostrings", "castor", "cowplot", "devtools", "dplyr", "ggExtra", "ggnewscale", "ggplot2", "ggridges", "ggtree", "ggtreeExtra", "glmnet", "gridExtra","igraph", "knitr", "matrixStats", "patchwork", "pheatmap", "purrr", "pscl", "RColorBrewer", "reshape","reshape2", "ROCR", "seqinr", "scales", "stringr", "stringi", "tidyr", "tidytree", "viridis")
+
+# Load required packages with error handling
+loaded.packages <- lapply(required.packages, function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    if (!require(package, character.only = TRUE)) {
+      message("Package ", package, " could not be installed and loaded.")
+      return(NULL)
+    }
+  }
+  return(package)
+})
+
+# Remove NULL entries from loaded packages
+loaded.packages <- loaded.packages[!sapply(loaded.packages, is.null)]
+```
+
+```{r class.output="sharedCode", echo=FALSE}
+# Print loaded packages
+cat("Loaded packages:", paste(loaded.packages, collapse = ", "), "\n")
+```
+
+```{r include=FALSE}
+# set.seed is used to fix the random number generation to make the results repeatable
+set.seed(123)
+```
+
+# Import Data Files
+
+Import **MUTANTS** files generated from [DHFR.2.Counts.RMD](https://github.com/PlesaLab/DHFR) relevant for downstream analysis.
+```{r}
+# mut_collapse_15_good_filtered
+mut_collapse_15_good_filtered <- read.csv("Mutants/mutants_files_formatted/mut_collapse_15_good_filtered.csv", 
+                         header = TRUE, stringsAsFactors = FALSE)
+```
+
+# BMS Analysis
+
+<font color="blue">**This section is based on the R file: "R_BMS_all.Lib15.R".**</font> It describes how to generate MSA mapping files for each homolog and map their fitness values by sequential amino acid positions aligned to E. coli as the reference sequence. The end result is a heatmap displaying median fitness values for each amino acid at each position along the protein sequence.
+
+## BMS - Complementation
+
+**Broad Mutational Scanning (BMS) Analysis Script:**
+This set of scripts facilitates broad mutational scanning analysis where data from many related protein homologs and their mutants is combined and collapsed for further analysis and visualization. This script is based on the approach used in: Plesa C, Sidore AM, Lubock N, Zhang D, Kosuri S. Multiplexed Gene Synthesis in Emulsions for Exploring Protein Functional Landscapes. Science 359, 343–347 (2018), [DOI: 10.1126/science.aao5167](https://www.science.org/doi/10.1126/science.aao5167).
+
+**Procedure**
+The analysis can be carried out by running the following scripts, which include <ins>python</ins> and <ins>bash</ins>:
+
+- `clustalo` Alignment python script based on fasta files generated for each library
+- `map.aligned.residues.py` Residue mapping from aligned fasta file generated for each library
+- `parse_dssp.py` Generate RSA and SS information files from the WT E. coli DHFR dssp file
+- `score_conservation.py` Generate Conservation score information file from the alignment file
+
+**Alignment:** Use the `clustalo` executable to align the protein sequences associated with the filtered perfects (designed homologs) with the following criteria: numprunedBCs >= 5, fitD05D03 > -1, ID mutations = 0. This will align the following FASTA file: **mutant.collapse.good.5AA.Lib15.fasta** for use in BMS analysis.
+
+<font color="red">**SKIP THIS ALIGNMENT IF ALREADY RUN.**</font>
+```{bash results = 'hide'}
+# May need to enable permissions to run the executable:
+#chmod +x ./clustalo
+./Scripts/clustalo -i Mutants/mutants_files_formatted/Lib15.mutant.collapse.good.5AA.fasta -o BMS/OUTPUT/Complementation/Lib15.mutant.collapse.good.5AA.tree.aligned.fasta.aln --outfmt=clustal --force
+```
+
+### Mapping Residues
+
+**Mapping Residues:** Use the following `map.aligned.residues.py` python script to generate csv files for each designed homolog and associated mutant that maps residue positions of each A.A. from alignment fasta:
+
+- `map_aligned_residues.py`
+This will parse the alignments and generate tables of which homolog's residue corresponds to which position in the alignment table so that co-aligned residues can be determined.
+```{python class.output="sharedCode"}
+# Verify current python version
+import sys
+print(f"Python version: {sys.version}")
+
+import time
+import csv
+
+##################################
+#INPUTS:
+
+base_path = ""
+trees_path_prefix = base_path+""
+
+#clustal format alignment file
+align_file_in = [trees_path_prefix+"BMS/OUTPUT/Lib15.mutant.collapse.good.5AA.tree.aligned.fasta.aln"] #New aligned FASTA
+
+#number of seqs in each alignment file
+num_samples_in_file = [418] #New FASTA (+1 from actual file count)
+
+##################################
+#OUTPUTS:
+
+msa_map_out_path = [trees_path_prefix+"BMS/MSA_Comp/"]
+```
+
+<font color="red">**This chunk can be SKIPPED if already ran once. Generates .csv files for each homolog in the "mut_collapse_15_good_filtered" collection:**</font>
+```{python results='hide'}
+# Verify current python version
+import sys
+print(f"Python version: {sys.version}")
+
+# Loop to generate .csv files for each ID
+for alni in range(1):
+    #print(alni)
+    
+    ##################################
+    #VARIABLES:
+    
+    #ID as key, align as value
+    align_dict = dict()
+    
+    #num_samples = 418
+    num_samples = num_samples_in_file[alni]
+    
+    #pos key, consensus pos val
+    IDaadictlist = [dict() for x in range(num_samples)]
+    
+    IDtoindexdict = dict()
+    indexdtoIDict = dict()
+    
+    ##################################
+    #CODE:
+    
+    line_count = 0
+    #loop over all alignments:
+    #print(align_file_in[alni])
+    for line in open(align_file_in[alni]):
+        #skip header
+        if line_count > 1:
+            listWords = line.split('    ')
+            ID = listWords[0]
+            align = line[16:].rstrip()
+            if ID.strip() != "":
+                align_dict[ID] = align_dict.get(ID, "") + align.replace(" ", "")
+        line_count += 1
+    
+    #print("NP_414590")
+    #print(align_dict["NP_414590"])
+
+    counter = 0
+    for ID in align_dict:
+        #print(ID)
+        #print(align_dict[ID])
+        IDtoindexdict[ID] = counter
+        indexdtoIDict[counter]=ID
+        align = align_dict[ID]
+        
+        aacounter = 1
+        
+        
+        for i in range(len(align)):
+            if align[i] != "-":
+                
+                #print(str(counter)+" "+str(aacounter))
+                IDaadictlist[counter][aacounter]=i+1
+                aacounter += 1
+        counter += 1
+        
+    #print(len(IDaadictlist))
+    for i in range(len(IDaadictlist)-1):
+        #print(indexdtoIDict[i])
+        #print(i)
+        #print(alni)
+        #print(indexdtoIDict[i])
+        csvfile = open(str(msa_map_out_path[alni]+indexdtoIDict[i]+".csv"), 'w')
+        fieldnames = ['orth_aanum','msa_aanum']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for j in IDaadictlist[i]:
+            #print(str(j)+" "+str(IDaadictlist[i][j]))
+            #save all data:
+            writer.writerow({'orth_aanum':str(j),'msa_aanum':str(IDaadictlist[i][j])})
+        csvfile.close()
+```
+
+### MSA Mapping
+Define the directory containing the parse MSA mapping files (.csv) for each perfect homolog (Lib15):
+```{r}
+BMS_MSA_directory = "BMS/MSA_Comp"
+
+# AA map + X
+BMS_aa_list<-data.frame(aa=c('G','P','A','V','L','I','M','C','F','Y','W','H','K','R','Q','N','E','D','S','T','X'),
+                        aanum=c(1:21))
+
+BMS_aa_dim <- length(BMS_aa_list$aa)
+
+# Wildtype E. coli is:
+#NP_414590
+
+# AA length of homolog which collapsing on
+BMS_ref_len <- 159
+
+# Minimum number of BCs to use a mutant
+BMS_min_BCs = 1
+
+# Largest number of mutations to use
+#currently limited to 5 due to mutation naming scheme
+BMS_max_mutations = 5
+
+# Minimum fitness to include the mutation
+BMS_min_fitness <- -1.2 # This lower range includes NP_414590 (WT E. coli DHFR)
+```
+
+```{r}
+# Grab perfects (mut_collapse_15_good_filtered)
+BMS_homolog_15_ID_list <- mut_collapse_15_good_filtered %>%
+  filter(mutations == 0 & numprunedBCs >= BMS_min_BCs) %>%
+  filter(fitD05D03 > BMS_min_fitness & !is.na(fitD05D03)) %>%
+  dplyr::select(ID)
+
+write.table(BMS_homolog_15_ID_list, file = paste("BMS/OUTPUT/Complementation/BMS_homolog_15_ID_list_min_fitness_",as.character(BMS_min_fitness),".csv",sep=""), sep = ",", row.names = F, quote=F, col.names = F)
+```
+
+```{r class.output="goodCode"}
+# Count the number of perfects retained after filtering by BMS_min_fitness (fitness > -1.2, which includes NP_414590)
+length(BMS_homolog_15_ID_list$ID)
+```
+
+```{r class.output="goodCode"}
+#make sure all of the perfects are in the MSA
+BMS_index_of_mut_to_drop = numeric()
+missing_files = character()
+
+for (i in 1:length(BMS_homolog_15_ID_list$ID)){
+  mutant_current_temp <- BMS_homolog_15_ID_list$ID[i]
+  file_path <- paste(BMS_MSA_directory,"/",mutant_current_temp,".csv",sep="")
+  
+  if(!file.exists(file_path)){
+    print(paste("Missing file:", mutant_current_temp))
+    BMS_index_of_mut_to_drop[length(BMS_index_of_mut_to_drop)+1] <-
+      which(BMS_homolog_15_ID_list$ID==mutant_current_temp)
+    missing_files <- c(missing_files, mutant_current_temp)
+  }
+}
+
+if (length(BMS_index_of_mut_to_drop) > 0){
+  BMS_homolog_15_ID_list <- BMS_homolog_15_ID_list[-BMS_index_of_mut_to_drop,]
+  print(paste("Total missing files:", length(missing_files)))
+  print("Missing files:")
+  print(missing_files)
+} else {
+  print("All files are present in the directory.")
+}
+
+# Print the number of remaining files
+print(paste("Number of files present:", nrow(BMS_homolog_15_ID_list)))
+```
+
+Convert BMS_homolog_15_ID_list to a data frame with a column named "ID"
+```{r}
+# Convert BMS_homolog_15_ID_list to a data frame with a column named "ID"
+BMS_homolog_15_ID_list_df <- data.frame(ID = BMS_homolog_15_ID_list)
+```
+
+### BMS Perfects
+
+Make a copy of the `mut_collapse_15_good_filtered` object filtered by the `BMS_homolog_15_ID_list_df` (min. fit = -1.2):
+```{r}
+BMS_mutants15_temp <- mut_collapse_15_good_filtered %>%
+  filter(numprunedBCs >= BMS_min_BCs & !is.na(fitD05D03) & mutations == 0) %>% 
+  semi_join(BMS_homolog_15_ID_list_df,by="ID") %>% #filtering join
+  ungroup() %>%
+  dplyr::rename(IDalign=ID)
+```
+
+Make a new data frame which will keep the mapping info:
+```{r}
+BMS_fitness15_map <- data.frame(position=numeric(),
+                              aa=character(),
+                              mutations=numeric(),
+                              fitness=numeric(),
+                              posortho=numeric(),
+                              ingap=character(),
+                              mutID=character(),
+                              ID=character())
+```
+
+Load the E coli MSA mapping file:
+```{r}
+#load ecoli MSA mapping
+BMS_ecoli_map <- read.csv(file=paste(BMS_MSA_directory,"/NP_414590.csv",sep=""),
+                          head=TRUE,
+                          sep=",")
+
+#E.coli DHFR seq: # Do we need to update this to include the starting "M"?
+BMS_ecoli_seq <- "ISLIAALAVDRVIGMENAMPWNLPADLAWFKRNTLNKPVIMGRHTWESIGRPLPGRKNIILSSQPGTDDRVTWVKSVDEAIAACGDVPEIMVIGGGRVYEQFLPKAQKLYLTHIDAEVEGDTHFPDYEPDDWESVFSEFHDADAQNSHSYCFEILERR"
+```
+
+Loop over all perfects in MSA directory with fitness scores for each a.a. position and determine if it maps to an E. coli residue. <font color="red">**SKIP THIS CHUNK IF LOOP HAS ALREADY BEEN RUN.**</font>
+```{r eval=FALSE, results='hide'}
+for (i in 1:nrow(BMS_mutants15_temp)) {
+  #current homolog:
+  mutant_current_temp <- BMS_mutants15_temp$IDalign[i]
+  
+  #get the MSA mapping:
+  mutant_map_temp <- read.csv(file=paste(BMS_MSA_directory,"/",mutant_current_temp,".csv",sep=""), head=TRUE, sep=",")
+  
+  #load and define the full seq for each homolog:
+  BMS_seq_temp <- as.character(BMS_mutants15_temp$seq[i])
+  
+  #get fitness for this homolog
+  BMS_fit_temp <- BMS_mutants15_temp$fitD05D03[i]
+  
+  #loop over all residues
+  for (j in 1:nchar(BMS_seq_temp)) {
+    #find the corresponding residue in E.coli using MSA
+    BMS_cons_aanum <- mutant_map_temp$msa_aanum[which(mutant_map_temp$orth_aanum == j)]
+    
+    #does this map to a non-gap residue in E.coli?
+    if (BMS_cons_aanum %in% BMS_ecoli_map$msa_aanum) {
+      #get the E.coli residue
+      e_coli_residue <- BMS_ecoli_map$orth_aanum[which(BMS_ecoli_map$msa_aanum == BMS_cons_aanum)]
+      
+      #aa at this residue
+      BMS_aa_temp <- substr(BMS_seq_temp, j, j)
+      
+      #add info for this residue to df
+      BMS_fitness15_map <- rbind(BMS_fitness15_map,
+                               data.frame(position=e_coli_residue,
+                                          aa=BMS_aa_temp,
+                                          mutations=0,
+                                          fitness=BMS_fit_temp,
+                                          posortho=j,
+                                          ingap="No",
+                                          mutID=mutant_current_temp,
+                                          ID=mutant_current_temp))
+    } else {
+      #if it's here it maps to a gap
+      BMS_aa_temp <- substr(BMS_seq_temp, j, j)
+      BMS_fitness15_map <- rbind(BMS_fitness15_map,
+                               data.frame(position=-1,
+                                          aa=BMS_aa_temp,
+                                          mutations=0,
+                                          fitness=BMS_fit_temp,
+                                          posortho=j,
+                                          ingap="Yes",
+                                          mutID=mutant_current_temp,
+                                          ID=mutant_current_temp))
+    }
+  }
+}
+
+#Save the `BMS_fitness15_map` object to re-load in future sessions (saves substantial computational time):
+write.csv(BMS_fitness15_map, "BMS/OUTPUT/Complementation/BMS_fitness15_complementation_map.csv", row.names = FALSE, quote = FALSE)
+```
+
+Load the `BMS_fitness15_map` dataset to continue the BMS analysis (if the loop step above was skipped).
+
+<font color="red">**SKIP THIS CHUNK IF LOOP ABOVE WAS RUN.**</font>
+```{r eval=TRUE}
+# Update which fitness map to read in Complementation (see loop above)
+BMS_fitness15_map <- read.csv("BMS/OUTPUT/Complementation/BMS_fitness15_complementation_map.csv", 
+                              header = TRUE, 
+                              stringsAsFactors = FALSE, 
+                              check.names = FALSE)
+```
+
+Confirm that correct number of unique mutIDs were integrated into the BMS_fitness15_map dataframe (should match count above):
+```{r class.output="goodCode"}
+# Count unique mutID in BMS_fitness15_map
+length(unique(BMS_fitness15_map$mutID))
+```
+
+Collapse (median) fitness values for each position onto the BMS Fitness Map:
+```{r}
+BMS_fitness15_collapsed <- BMS_fitness15_map %>%
+  filter(position > 0) %>%
+  group_by(position, aa) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness))
+```
+
+These matrices have the fitness for each aa at each position:
+```{r}
+BMS_matrix15_perfects = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+BMS_matrix15_perfects_num = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+BMS_matrix15_perfects_sd = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+```
+
+Populate matrix:
+```{r}
+for (i in 1:nrow(BMS_fitness15_collapsed)){
+  BMS_matrix15_perfects[which(BMS_aa_list$aa==as.character(BMS_fitness15_collapsed$aa[i])),
+                      BMS_fitness15_collapsed$position[i]] <- as.numeric(BMS_fitness15_collapsed$fitval[i])
+  BMS_matrix15_perfects_num[which(BMS_aa_list$aa==as.character(BMS_fitness15_collapsed$aa[i])),
+                          BMS_fitness15_collapsed$position[i]] <- as.numeric(BMS_fitness15_collapsed$numpoints[i])
+  BMS_matrix15_perfects_sd[which(BMS_aa_list$aa==as.character(BMS_fitness15_collapsed$aa[i])),
+                         BMS_fitness15_collapsed$position[i]] <- as.numeric(BMS_fitness15_collapsed$stdfit[i])
+}
+```
+
+Assign AA names and position numbers to matrices:
+```{r warning=FALSE}
+rownames(BMS_matrix15_perfects)<-BMS_aa_list$aa
+colnames(BMS_matrix15_perfects)<-c(1:BMS_ref_len)
+rownames(BMS_matrix15_perfects_num)<-BMS_aa_list$aa
+colnames(BMS_matrix15_perfects_num)<-c(1:BMS_ref_len)
+rownames(BMS_matrix15_perfects_sd)<-BMS_aa_list$aa
+colnames(BMS_matrix15_perfects_sd)<-c(1:BMS_ref_len)
+
+BMS_matrix15_perfects_melt <- melt(BMS_matrix15_perfects)
+BMS_matrix15_perfects_num_melt <- melt(BMS_matrix15_perfects_num)
+BMS_matrix15_perfects_sd_melt <- melt(BMS_matrix15_perfects_sd)
+```
+
+### Perfects Plotting
+
+Calculate the minimum and maximum values of `BMS_matrix15_perfects_melt` prior to plotting:
+```{r class.output="goodCode"}
+# Min
+min(BMS_matrix15_perfects_melt$value, na.rm=T)
+
+# Max
+max(BMS_matrix15_perfects_melt$value, na.rm=T)
+```
+
+Plot the fitness data for the perfects:
+```{r}
+# Rename columns to "X1" and "X2"
+names(BMS_matrix15_perfects_melt)[names(BMS_matrix15_perfects_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+BMS_matrix15_perfects_melt_plot <- ggplot(data = BMS_matrix15_perfects_melt, aes(x=X2, y=X1, fill=value)) +
+  geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient2(low = "blue", high = "red", mid="gold",name="Fitness",na.value="grey", limit = c(-1,1)) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,155,5))
+
+print(BMS_matrix15_perfects_melt_plot)
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/BMS_allpos15_minBC_1_mutations_0_fit.pdf", 
+       plot=BMS_matrix15_perfects_melt_plot,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot the coverage data:
+```{r}
+# Rename columns to "X1" and "X2"
+names(BMS_matrix15_perfects_num_melt)[names(BMS_matrix15_perfects_num_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+BMS_matrix15_perfects_num_melt_plot <- ggplot(data = BMS_matrix15_perfects_num_melt, aes(x=X2, y=X1, fill=log(value))) +
+  geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient(low = "blue", high = "red",name="log(#points)",na.value="grey", limit = c(0,max(BMS_matrix15_perfects_num_melt$value))) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,155,5))
+
+print(BMS_matrix15_perfects_num_melt_plot)
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/BMS_allpos15_minBC_1_mutations_0_num.pdf", plot=BMS_matrix15_perfects_num_melt_plot,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot the STD Data:
+```{r}
+# Rename columns to "X1" and "X2"
+names(BMS_matrix15_perfects_sd_melt)[names(BMS_matrix15_perfects_sd_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+BMS_matrix15_perfects_sd_melt_plot <- ggplot(data = BMS_matrix15_perfects_sd_melt, aes(x=X2, y=X1, fill=value)) +
+  geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient2(low = "blue", high = "red", mid="gold",name="std(Fitness)",na.value="grey", limit = c(0,1.1*max(BMS_matrix15_perfects_sd_melt$value))) +
+  theme_minimal() + 
+  scale_x_continuous(breaks=seq(0,155,5))
+
+print(BMS_matrix15_perfects_sd_melt_plot)
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/BMS_allpos15_minBC_1_mutations_0_sd.pdf", 
+       plot=BMS_matrix15_perfects_sd_melt_plot,
+       width=13.3, height=6.5, units="in")
+```
+
+### BMS Mutants
+
+Count the total number of mutants in the `mut_collapse_15_good_filtered` dataset:
+```{r class.output="goodCode"}
+# Count mutants (up to 5 AA) associated with perfects after filtering by minimum fitness (-1)
+mut_collapse_15_good_filtered %>%
+  filter(mutations > 0 & mutations < 6 & numprunedBCs >= BMS_min_BCs & !is.na(fitD05D03)) %>%
+  semi_join(BMS_homolog_15_ID_list,by="ID") %>%
+  ungroup() %>%
+  dplyr::rename(IDalign=ID) %>%
+  nrow(.)
+```
+
+Make a copy of the BMS_fitness15_map object for adding the mutants:
+```{r}
+# Make a copy of the dataframe for mutants
+BMS_fitness15_map_all <- BMS_fitness15_map
+```
+
+Loop over mutants at some distance (up to 5 aa distance):
+```{r}
+for (BMS_cur_mut_num in 1:BMS_max_mutations){
+  
+  #grab the mutants (remove any mutants with "NA" fitness value for fitD05D03)
+  BMS_mutants15_temp <- mut_collapse_15_good_filtered %>%
+    filter(mutations > 0 & mutations < 6 & numprunedBCs >= BMS_min_BCs & !is.na(fitD05D03)) %>%
+    filter(mutations == BMS_cur_mut_num) %>%
+    semi_join(BMS_homolog_15_ID_list,by="ID") %>% #filtering join
+    ungroup() %>%
+    dplyr::rename(IDalign=ID)
+  
+  #initialize new df
+  BMS_fitness15_map1 <- data.frame(position=numeric(),
+                                 aa=character(),
+                                 mutations=numeric(),
+                                 fitness=numeric(),
+                                 posortho=numeric(),
+                                 ingap=character(),
+                                 mutID=character(),
+                                 ID=character())
+  
+  #loop over mutants
+  for (i in 1:nrow(BMS_mutants15_temp)){
+    
+    #mutant base name
+    mutant_current_temp <- BMS_mutants15_temp$IDalign[i]
+    
+    #length of the name
+    name_size = nchar(paste(mutant_current_temp,"_",sep=""))
+    
+    #residue mappings
+    mutant_map_temp <- read.csv(file=paste(BMS_MSA_directory,"/",mutant_current_temp,".csv",sep=""),head=TRUE,sep=",")
+    
+    #this mutants fitness
+    BMS_fit_temp <- BMS_mutants15_temp$fitD05D03[i]
+    
+    #grab the mut name
+    mutations15_names <- as.character(BMS_mutants15_temp$mutID[i])
+    
+    #grab only the relevant portion of the name
+    mutations15_names <- substr(mutations15_names, name_size+1, nchar(mutations15_names))
+    
+    ## split mutation string at non-digits
+    s <- strsplit(mutations15_names, "_")
+    
+    mut_total_length<- nchar(BMS_mutants15_temp$seq[i])
+    
+    for (mutnum in 1:BMS_cur_mut_num){
+      
+      #grab the corresponding mutation string
+      mutcurr<-s[[1]][mutnum]
+      
+      #get the position
+      mutpos <- as.numeric(str_extract(mutcurr, "[0-9]+"))
+      
+      if (mutpos<=mut_total_length){
+        #get ending aa
+        to_aa <- substr(mutcurr, nchar(mutpos)+2, nchar(mutcurr))
+        
+        #find the number in the consensus seq
+        BMS_cons_aanum <- mutant_map_temp$msa_aanum[which(mutant_map_temp$orth_aanum == mutpos)]
+        
+        #does this map to a non-gap
+        if (BMS_cons_aanum %in% BMS_ecoli_map$msa_aanum){
+          
+          #the corresponding e.coli residue
+          e_coli_residue <- BMS_ecoli_map$orth_aanum[which(BMS_ecoli_map$msa_aanum == BMS_cons_aanum)]
+          
+          #add this point to the data
+          BMS_fitness15_map1 <- rbind(BMS_fitness15_map1,
+                                    data.frame(position=e_coli_residue,
+                                               aa=to_aa,
+                                               mutations=BMS_cur_mut_num,
+                                               fitness=BMS_fit_temp,
+                                               posortho=mutpos,
+                                               ingap="No",
+                                               mutID=as.character(BMS_mutants15_temp$mutID[i]),
+                                               ID=mutant_current_temp))
+          
+        } else {
+          #if it's here it maps to a gap
+          
+          #add this point to the data
+          BMS_fitness15_map1 <- rbind(BMS_fitness15_map1,
+                                    data.frame(position=-1,
+                                               aa=to_aa,
+                                               mutations=BMS_cur_mut_num,
+                                               fitness=BMS_fit_temp,
+                                               posortho=mutpos,
+                                               ingap="Yes",
+                                               mutID=as.character(BMS_mutants15_temp$mutID[i]),
+                                               ID=mutant_current_temp))
+          
+        }
+      }
+      
+    }
+    
+  }
+
+  #Add these mutants onto the existing data:
+  BMS_fitness15_map_all <- rbind(BMS_fitness15_map_all,BMS_fitness15_map1)
+
+  write.table(BMS_fitness15_map1, file = paste("BMS/OUTPUT/Complementation/BMS_fitness15_map_",
+                                               as.character(BMS_cur_mut_num),".csv",sep=""), 
+            sep = ",", row.names = F,quote=F,col.names = T)
+  
+  #Calculate all data and stats
+  BMS_fitness15_collapsed_all <- BMS_fitness15_map_all %>%
+    filter(position > 0) %>%
+    group_by(position, aa) %>%
+    summarise(fitval=median(fitness),
+              numpoints=n(),
+              stdfit=sd(fitness))
+  
+  #these matrices have the fitness/num/sd for each aa at each position:
+  BMS_matrix15_perfects_and_1 = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+  BMS_matrix15_perfects_and_1_num = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+  BMS_matrix15_perfects_and_1_sd = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+  
+  #populate matrix
+  for (i in 1:nrow(BMS_fitness15_collapsed_all)){
+    
+    BMS_matrix15_perfects_and_1[which(BMS_aa_list$aa==as.character(BMS_fitness15_collapsed_all$aa[i])),BMS_fitness15_collapsed_all$position[i]] <- as.numeric(BMS_fitness15_collapsed_all$fitval[i])
+    BMS_matrix15_perfects_and_1_num[which(BMS_aa_list$aa==as.character(BMS_fitness15_collapsed_all$aa[i])),BMS_fitness15_collapsed_all$position[i]] <- as.numeric(BMS_fitness15_collapsed_all$numpoints[i])
+    BMS_matrix15_perfects_and_1_sd[which(BMS_aa_list$aa==as.character(BMS_fitness15_collapsed_all$aa[i])),BMS_fitness15_collapsed_all$position[i]] <- as.numeric(BMS_fitness15_collapsed_all$stdfit[i])
+  }
+  
+  rownames(BMS_matrix15_perfects_and_1)<-BMS_aa_list$aa
+  colnames(BMS_matrix15_perfects_and_1)<-c(1:BMS_ref_len)
+  rownames(BMS_matrix15_perfects_and_1_num)<-BMS_aa_list$aa
+  colnames(BMS_matrix15_perfects_and_1_num)<-c(1:BMS_ref_len)
+  rownames(BMS_matrix15_perfects_and_1_sd)<-BMS_aa_list$aa
+  colnames(BMS_matrix15_perfects_and_1_sd)<-c(1:BMS_ref_len)
+  
+  BMS_matrix15_perfects_and_1_melt <- melt(BMS_matrix15_perfects_and_1)
+  BMS_matrix15_perfects_and_1_num_melt <- melt(BMS_matrix15_perfects_and_1_num)
+  BMS_matrix15_perfects_and_1_sd_melt <- melt(BMS_matrix15_perfects_and_1_sd)
+  
+  # Rename columns to "X1" and "X2"
+  names(BMS_matrix15_perfects_and_1_melt)[names(BMS_matrix15_perfects_and_1_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+  names(BMS_matrix15_perfects_and_1_num_melt)[names(BMS_matrix15_perfects_and_1_num_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+  names(BMS_matrix15_perfects_and_1_sd_melt)[names(BMS_matrix15_perfects_and_1_sd_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+  
+  #Calculate minimum and maximum fitness values for each mutation level:
+  min(BMS_matrix15_perfects_and_1_melt$value, na.rm=T)
+  max(BMS_matrix15_perfects_and_1_melt$value, na.rm=T)
+  
+  #plot the data from these mutants:
+  ggplot(data = BMS_matrix15_perfects_and_1_melt, aes(x=X2, y=X1, fill=value)) +
+    geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+    scale_fill_gradient2(low = "blue", high = "red", mid="gold",name="Fitness",na.value="grey", limit = c(min(BMS_matrix15_perfects_and_1_sd_melt$value),max(BMS_matrix15_perfects_and_1_sd_melt$value))) +
+    theme_minimal() + 
+    scale_x_continuous(breaks=seq(0,155,5))
+  ggsave(file=paste("BMS/PLOTS/Complementation/BMS_allpos15_min",toString(BMS_min_BCs),"_max",toString(BMS_cur_mut_num),"_fit.pdf",sep=""))
+  
+  write.table(BMS_matrix15_perfects_and_1_melt, 
+              file = paste("BMS/OUTPUT/Complementation/BMS_matrix_perfects_and_", 
+                           as.character(BMS_cur_mut_num),"_fit_melt.csv",sep=""), 
+            sep = ",", row.names = F,quote=F,col.names = T)
+  
+  ggplot(data = BMS_matrix15_perfects_and_1_num_melt, aes(x=X2, y=X1, fill=log(value))) +
+    geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+    scale_fill_gradient(low = "blue", high = "red",name="log(#points)",na.value="grey", 
+                        limit = c(0,max(BMS_matrix15_perfects_and_1_num_melt$value))) +
+    theme_minimal() + 
+    scale_x_continuous(breaks=seq(0,155,5))
+  ggsave(file=paste("BMS/PLOTS/Complementation/BMS_allpos15_min",toString(BMS_min_BCs),"_max",toString(BMS_cur_mut_num),"_num.pdf",sep=""))
+  
+  write.table(BMS_matrix15_perfects_and_1_num_melt, 
+              file = paste("BMS/OUTPUT/Complementation/BMS_matrix15_perfects_and_", 
+                           as.character(BMS_cur_mut_num),"_num_melt.csv",sep=""), 
+            sep = ",", row.names = F,quote=F,col.names = T)
+  
+  ggplot(data = BMS_matrix15_perfects_and_1_sd_melt, aes(x=X2, y=X1, fill=value)) +
+    geom_tile()+ labs(x = "Position (aa)", y ="Amino acid",color="") +
+    scale_fill_gradient2(low = "blue", high = "red", mid="gold",name="std(Fitness)",na.value="grey", limit = c(0,1.1*max(BMS_matrix15_perfects_and_1_sd_melt$value))) +
+    theme_minimal() + 
+    scale_x_continuous(breaks=seq(0,155,5))
+  ggsave(file=paste("BMS/PLOTS/Complementation/BMS_allpos15_min",toString(BMS_min_BCs),"_max",toString(BMS_cur_mut_num),"_sd.pdf",sep=""))
+  
+  write.table(BMS_matrix15_perfects_and_1_sd_melt, 
+              file = paste("BMS/OUTPUT/Complementation/BMS_matrix15_perfects_and_", 
+                           as.character(BMS_cur_mut_num),"_sd_melt.csv",sep=""), 
+            sep = ",", row.names = F,quote=F,col.names = T)
+}
+```
+
+### BMS Custom Build
+
+Import the `BMS_matrix15_perfects_and_5_melt` dataset based on 5 a.a. mutations:
+```{r}
+# Import the BMS_matrix15 dataset based on 1 a.a. mutation:
+BMS_matrix15_perfects_and_1_melt <- read.csv("BMS/OUTPUT/Complementation/BMS_matrix_perfects_and_5_fit_melt.csv", 
+                                             header = TRUE)
+```
+
+Begin by adding a new column for the WT residues:
+```{r}
+BMS_matrix15_perfects_and_1_melt$WTcolor <- NA
+#X1 is aa, X2 is position
+
+BMS_matrix15_perfects_and_1_melt$aanum <- 0
+
+for (i in 1:nrow(BMS_matrix15_perfects_and_1_melt)){
+  
+  #find the corresponding residue in E.coli using MSA
+  BMS_cons_aanum <- BMS_matrix15_perfects_and_1_melt$X2[i]
+  
+  #is this the WT E.coli residue?
+  if (BMS_matrix15_perfects_and_1_melt$X1[i] == substr(BMS_ecoli_seq, BMS_cons_aanum, BMS_cons_aanum)){
+    
+    #assign WT color
+    BMS_matrix15_perfects_and_1_melt$WTcolor[i] <- "red"
+    
+  }
+  
+  BMS_matrix15_perfects_and_1_melt$aanum[i] <- which(BMS_aa_list$aa == BMS_matrix15_perfects_and_1_melt$X1[i])
+  
+}
+```
+
+Read in the RSA, SS, and Conservation files:
+```{r}
+RSA_1H1T <- read.table("BMS/DSSP/4KJK.RSAs.txt", skip = 2, header = FALSE)
+SS_1H1T <- read.table("BMS/DSSP/4KJK.SSs.txt", skip = 2, header = FALSE)
+cons_1H1T <- read.table("BMS/DSSP/Lib15.JSD.out.txt", skip = 5, header = FALSE)
+```
+
+In the conservation score file, replace values of -1000 with NA to ignore downstream:
+```{r}
+# Replace values of -1000 with NA:
+cons_1H1T$V2[cons_1H1T$V2 == -1000] <- NA
+```
+
+Add in the RSA, SS, and Conservation scores for plotting:
+```{r}
+colnames(cons_1H1T) <- c("pos","cons","col")
+cons_1H1T$pos <- cons_1H1T$pos+1
+
+protein_info_1H1T <- RSA_1H1T %>%
+  right_join(SS_1H1T, by="V1")
+
+colnames(protein_info_1H1T) <- c("pos","RSA","SS")
+
+protein_info_1H1T$cons <- 0
+
+for (i in 1:nrow(cons_1H1T)){
+  #get MSA position: cons_1H1T$pos[i]
+  #find if this position exists in the e.coli MSA
+  if (cons_1H1T$pos[i] %in% BMS_ecoli_map$msa_aanum){
+    #get corresponding residue
+    e_coli_residue <- BMS_ecoli_map$orth_aanum[which(BMS_ecoli_map$msa_aanum==cons_1H1T$pos[i])]
+    protein_info_1H1T$cons[which(protein_info_1H1T$pos==e_coli_residue)] <- cons_1H1T$cons[i]
+  }
+}
+```
+
+Merge `protein_info_1H1T` with the `BMS_matrix15_perfects_and_1_melt` fitness scores for each a.a. at each position:
+```{r}
+protein_info_1H1T <- BMS_matrix15_perfects_and_1_melt %>%
+  filter(X1 != "X") %>%
+  group_by(X2) %>%
+  dplyr::rename(pos=X2) %>%
+  summarise(avgfit=mean(value,na.rm=TRUE),
+            numcov=20-sum(is.na(value))) %>%
+  right_join(protein_info_1H1T, by="pos")
+
+protein_info_1H1T_melt <- melt(as.data.frame(protein_info_1H1T),
+                               id=c("pos"))
+
+protein_info_1H1T_melt$yval <- 0
+protein_info_1H1T_melt$yval[which(protein_info_1H1T_melt$variable=="avgfit")] <- 23
+protein_info_1H1T_melt$yval[which(protein_info_1H1T_melt$variable=="RSA")] <- 24
+protein_info_1H1T_melt$yval[which(protein_info_1H1T_melt$variable=="SS")] <- 25
+
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="X")] <- 21.3
+```
+
+Calculate the min. and max. avgfit values in `protein_info_1H1T`:
+```{r class.output="goodCode"}
+# Minimum avgfit:
+min(protein_info_1H1T$avgfit, na.rm = T)
+
+# Maximium avgfit:
+max(protein_info_1H1T$avgfit, na.rm = T)
+```
+
+Generate a fitness values file from the protein_info_1H1T object:
+```{r}
+sink("BMS/structures/avg_fit_4KJK_complementation_attribute.defattr")
+cat("# BMS data for 4KJK\n")
+cat("attribute: percentExposed\n")
+cat("match mode: 1-to-1\n")
+cat("recipient: residues\n")
+for (i in 1:nrow(protein_info_1H1T)){
+  cat(paste("\t:",
+            as.character(protein_info_1H1T$pos[i]),
+            "\t",
+            as.character(protein_info_1H1T$avgfit[i]),
+            "\n",
+            sep=""))
+}
+
+sink()
+```
+
+Determine coverage:
+```{r warning=FALSE, class.output="goodCode"}
+(nrow(BMS_matrix15_perfects_and_1_melt %>%
+            filter(X1 != "X") %>%
+            dplyr::select(value)) -
+  sum(is.na(BMS_matrix15_perfects_and_1_melt %>%
+              filter(X1 != "X") %>%
+              dplyr::select(value))))/nrow(BMS_matrix15_perfects_and_1_melt %>%
+                                             filter(X1 != "X") %>%
+                                             dplyr::select(value))
+
+
+
+BMS_Fig_yminlim <- -2
+BMS_Fig_ymaxlim <- 30
+BMS_Fig_xminlim <- -1
+BMS_Fig_xmaxlim <- 160
+
+# Read in BMS_fitness15_map_1 with 1 a.a. mutation
+BMS_1mut15_del <- read.table("BMS/OUTPUT/Complementation/BMS_fitness15_map_1.csv", skip = 0 , sep=",",header = TRUE )
+
+# Calculate all data and stats
+BMS_1mut15_del_collapsed_all <- BMS_1mut15_del %>%
+  filter(position > 0) %>%
+  group_by(position, aa) %>%
+  summarise(fitval=median(fitness),
+            numpoints=n(),
+            stdfit=sd(fitness))
+
+# These matrices have the fitness/num/sd for each aa at each position:
+BMS_1mut15_del_matrix = matrix(rep(NA, BMS_ref_len*BMS_aa_dim),nrow=BMS_aa_dim,ncol=BMS_ref_len)
+
+# Populate matrix
+for (i in 1:nrow(BMS_1mut15_del_collapsed_all)){
+  
+  BMS_1mut15_del_matrix[which(BMS_aa_list$aa==as.character(BMS_1mut15_del_collapsed_all$aa[i])),BMS_1mut15_del_collapsed_all$position[i]] <- as.numeric(BMS_1mut15_del_collapsed_all$fitval[i])
+}
+
+rownames(BMS_1mut15_del_matrix)<-BMS_aa_list$aa
+colnames(BMS_1mut15_del_matrix)<-c(1:BMS_ref_len)
+
+BMS_1mut15_del_matrix_melt <- melt(BMS_1mut15_del_matrix)
+
+# Rename columns to "X1" and "X2"
+names(BMS_1mut15_del_matrix_melt)[names(BMS_1mut15_del_matrix_melt) %in% c("Var1", "Var2")] <- c("X1", "X2")
+
+BMS_1mut15_del_matrix_melt <- BMS_1mut15_del_matrix_melt %>%
+  filter(X1=="X")
+BMS_1mut15_del_matrix_melt$WTcolor <- NA
+BMS_1mut15_del_matrix_melt$aanum <- 21.3
+  
+BMS_matrix15_perfects_and_1_melt <- BMS_matrix15_perfects_and_1_melt %>%
+  filter(X1!="X")
+
+BMS_matrix15_perfects_and_1_melt <- rbind(BMS_matrix15_perfects_and_1_melt,BMS_1mut15_del_matrix_melt)
+
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="A")] <- 12
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="C")] <- 10
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="D")] <- 5
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="E")] <- 4
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="F")] <- 19
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="G")] <- 11
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="H")] <- 3
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="I")] <- 15
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="K")] <- 1
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="L")] <- 14
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="M")] <- 16
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="N")] <- 6
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="P")] <- 17
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="Q")] <- 7
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="R")] <- 2
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="S")] <- 9
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="T")] <- 8
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="V")] <- 13
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="W")] <- 20
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="Y")] <- 18
+BMS_matrix15_perfects_and_1_melt$aanum[which(BMS_matrix15_perfects_and_1_melt$X1=="X")] <- 22.6
+
+BMS_matrix15_perfects_and_1_melt_WT <- BMS_matrix15_perfects_and_1_melt %>%
+  filter(WTcolor=="red")
+```
+
+Calculate the min. and max. value in `BMS_matrix15_perfects_and_1_melt` for plotting below:
+```{r class.output="goodCode"}
+# Minimum value:
+min(BMS_matrix15_perfects_and_1_melt$value, na.rm = T)
+
+# Maximium value:
+max(BMS_matrix15_perfects_and_1_melt$value, na.rm = T)
+```
+
+### BMS Custom Plot
+
+Adjust the index position to shift to the right:
+```{r}
+BMS_matrix15_perfects_and_1_melt_withM <- BMS_matrix15_perfects_and_1_melt %>%
+  filter(X2==1) %>%
+  mutate(X2=0, value=NA)
+
+BMS_matrix15_perfects_and_1_melt_fix <- rbind(BMS_matrix15_perfects_and_1_melt_withM, BMS_matrix15_perfects_and_1_melt)
+```
+
+Bring it all together to build a custom BMS plot for COMPLEMENTATION (fitD05D03) for LIBRARY 15:
+```{r}
+BMS_plot15 <- ggplot() +
+  #BMS matrix
+  geom_rect(data=BMS_matrix15_perfects_and_1_melt_fix,aes(xmin=X2+1, xmax=X2+2, ymin=aanum, ymax=aanum+1, fill=value))+
+  #WT seq
+  geom_rect(data=BMS_matrix15_perfects_and_1_melt_WT,aes(xmin=X2+1, xmax=X2+2, ymin=aanum, ymax=aanum+1), color="black",alpha=0)+
+  #avg fit
+  geom_rect(data=protein_info_1H1T,aes(xmin=pos+1, xmax=pos+2, ymin=21.3, ymax=22.3,fill=avgfit)) +
+  labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient2(low = "blue", high = "red", mid="gold",name="Fitness",na.value="grey", limit = c(-6,3)) + 
+  geom_text(data=BMS_matrix15_perfects_and_1_melt[1:21,], aes(x=-1, y=aanum+0.5, label=X1), size=3.5)+
+  geom_text(data=data.frame(pos=seq(0,150,30)),aes(x=pos+0.5,y=0,label=pos))+
+  geom_segment(aes(x = 14.5, y = 1, xend = 14.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 15.5, y = 1, xend = 15.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 16.5, y = 1, xend = 16.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 17.5, y = 1, xend = 17.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 20.5, y = 1, xend = 20.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 27.5, y = 1, xend = 27.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 31.5, y = 1, xend = 31.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 32.5, y = 1, xend = 32.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 46.5, y = 1, xend = 46.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 52.5, y = 1, xend = 52.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 57.5, y = 1, xend = 57.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 94.5, y = 1, xend = 94.5, yend = 0), colour = "blue")+
+  geom_segment(aes(x = 100.5, y = 1, xend = 100.5, yend = 0), colour = "blue")+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.line=element_blank())+
+  xlim(BMS_Fig_xminlim,BMS_Fig_xmaxlim)+
+  ylim(BMS_Fig_yminlim,BMS_Fig_ymaxlim)
+
+BMS_plot15
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/BMS_Lib15_Complementation_Legend.mean.fixed.pdf", 
+       plot=BMS_plot15,
+       width=13.3, height=6.5, units="in")
+
+#Plot without legend and save copy
+BMS_plot15_2 <- BMS_plot15 + theme(legend.position="none")
+
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/BMS_Lib15_Complementation_no_Legend.mean.fixed.pdf", 
+       plot=BMS_plot15_2,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot the SS string to go above the custom BMS plot:
+```{r}
+protein_info_1H1T_no_loop <- protein_info_1H1T %>%
+  filter(SS != "loop")
+
+# Plot SS
+
+SS_plot15 <- ggplot()+
+  geom_segment(aes(x = 1, y = 24.5, xend = 160, yend = 24.5), colour = "black")+
+  geom_rect(data=protein_info_1H1T_no_loop,aes(xmin=pos, xmax=pos+1, ymin=24, ymax=25, fill=SS))+
+  xlim(BMS_Fig_xminlim,BMS_Fig_xmaxlim)+
+  ylim(BMS_Fig_yminlim,BMS_Fig_ymaxlim)+
+  labs(x = "", y ="",color="") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.line=element_blank())
+
+SS_plot15
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/SS_Lib15_Complementation_Legend.fixed.pdf", 
+       plot=SS_plot15,
+       width=13.3, height=6.5, units="in")
+
+#Plot without legend and save copy
+SS_plot15_2 <- SS_plot15 + theme(legend.position="none")
+
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/SS_Lib15_Complementation_no_Legend.fixed.pdf", 
+       plot=SS_plot15_2,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot the RSA (protein) string:
+```{r}
+RSA_plot15 <- ggplot(protein_info_1H1T)+
+  geom_rect(aes(xmin=pos, xmax=pos+1, ymin=25.3, ymax=26.3, fill=RSA))+
+  xlim(BMS_Fig_xminlim,BMS_Fig_xmaxlim)+
+  ylim(BMS_Fig_yminlim,BMS_Fig_ymaxlim)+
+  labs(x = "", y ="",color="") +
+  scale_fill_gradient(low = "white", high = "red",name="RSA",na.value="grey") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.line=element_blank())
+
+RSA_plot15
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/RSA_Lib15_Complementation_Legend.fixed.pdf", 
+       plot=RSA_plot15,
+       width=13.3, height=6.5, units="in")
+
+#Plot without legend and save copy
+RSA_plot15_2 <- RSA_plot15 + theme(legend.position="none")
+
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/RSA_Lib15_Complementation_no_Legend.fixed.pdf", 
+       plot=RSA_plot15_2,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot the conservation score:
+```{r}
+cons_plot15 <- ggplot(protein_info_1H1T)+
+  geom_rect(aes(xmin=pos, xmax=pos+1, ymin=26.6, ymax=27.6, fill=cons))+
+  xlim(BMS_Fig_xminlim,BMS_Fig_xmaxlim)+
+  ylim(BMS_Fig_yminlim,BMS_Fig_ymaxlim)+
+  labs(x = "", y ="",color="") +
+  scale_fill_gradient(low = "white", high = "red",name="Cons",na.value="grey") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.line=element_blank())
+
+cons_plot15
+```
+
+```{r echo=FALSE}
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/Cons_Lib15_Complementation_Legend.fixed.pdf", 
+       plot=cons_plot15,
+       width=13.3, height=6.5, units="in")
+
+#Plot without legend and save copy
+cons_plot15_2 <- cons_plot15 + theme(legend.position="none")
+
+#Saving 13.3 x 6.51 in images
+ggsave(file="BMS/PLOTS/Complementation/Custom/Cons_Lib15_Complementation_no_Legend.fixed.pdf", 
+       plot=cons_plot15_2,
+       width=13.3, height=6.5, units="in")
+```
+
+### Summary Plots
+
+Plot average fitness versus position coverage:
+```{r}
+coverage_fit_plot15 <- ggplot(protein_info_1H1T,aes(x=avgfit,y=numcov/20*100))+
+  geom_smooth(fill="#0072B2")+
+  geom_point()+
+  labs(x = "Average fitness at position", y ="Position mutational coverage (%)",color="") +
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+coverage_fit_plot15
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="BMS/PLOTS/Complementation/Summary/Lib15_Complementation_Coverage_vs_Avg_Fit.pdf",
+       plot=coverage_fit_plot15,
+       width=6, height=5, units="in")
+```
+
+Correlation Test for coverage versus average fit:
+```{r class.output="goodCode"}
+cor.test(protein_info_1H1T$avgfit,protein_info_1H1T$numcov/20*100)
+cor(protein_info_1H1T$avgfit,protein_info_1H1T$numcov, use = "complete.obs")
+```
+
+Plot Average Fit versus SS:
+```{r}
+SS_fit_plot15 <- ggplot(protein_info_1H1T,aes(x=SS,y=avgfit))+
+  geom_boxplot(color="black", fill="#0072B2", alpha = 0.8)+
+  geom_jitter()+
+  labs(x = "Secondary structure", y ="Average fitness at position",color="")+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+SS_fit_plot15
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="BMS/PLOTS/Complementation/Summary/Lib15_Complementation_Avg_Fit_vs_SS.pdf", 
+       plot=SS_fit_plot15,
+       width=6, height=5, units="in")
+```
+
+Plot Average Fit versus Conservation:
+```{r}
+Cons_fit_plot15 <- ggplot(protein_info_1H1T,aes(x=cons,y=avgfit))+
+  geom_smooth()+
+  geom_point(alpha=0.7)+
+  labs(x = "Position Conservation", y ="Average fitness at position",color="")+
+  xlim(0.1,0.8)+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+Cons_fit_plot15 <- ggExtra::ggMarginal(Cons_fit_plot15,type = "histogram",
+                         xparams = list(bins=30),
+                         yparams = list(bins=20),
+                         col = 'black',
+                         fill = '#0072B2', alpha = 0.8) 
+
+Cons_fit_plot15
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="BMS/PLOTS/Complementation/Summary/Lib15_Complementation_Avg_Fit_vs_Cons.pdf", 
+       plot=Cons_fit_plot15,
+       width=6, height=5, units="in")
+```
+
+Correlation Tests for Cons versus average fit:
+```{r class.output="goodCode"}
+cor.test(protein_info_1H1T$cons,protein_info_1H1T$avgfit)
+cor(protein_info_1H1T$cons,protein_info_1H1T$avgfit, use = "complete.obs")
+```
+
+Plot Average Fit versus RSA:
+```{r}
+RSA_fit_plot15 <- ggplot(protein_info_1H1T,aes(x=RSA,y=avgfit))+
+  geom_smooth()+
+  geom_point(alpha=0.7)+
+  labs(x = "Relative solvent accesibility", y ="Average fitness at position",color="")+
+  #ylim(-2.7,2.7)+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+RSA_fit_plot15 <- ggExtra::ggMarginal(RSA_fit_plot15,type = "histogram",
+                         xparams = list(bins=30),
+                         yparams = list(bins=20),
+                         col = 'black',
+                         fill = '#0072B2', alpha = 0.8) 
+
+RSA_fit_plot15
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="BMS/PLOTS/Complementation/Summary/Lib15_Complementation_Avg_Fit_vs_RSA.pdf", 
+       plot=RSA_fit_plot15,
+       width=6, height=5, units="in")
+```
+
+Correlation Tests for RSA versus average fit:
+```{r class.output="goodCode"}
+cor.test(protein_info_1H1T$RSA,protein_info_1H1T$avgfit)
+cor(protein_info_1H1T$RSA,protein_info_1H1T$avgfit, use = "complete.obs")
+```
+
+Plot the average fitness for WT E. coli DHFR vs. All remaining DHFR homologs:
+```{r}
+WT_fit_plot15 <- ggplot(BMS_matrix15_perfects_and_1_melt,aes(x=WTcolor,y=value))+
+  geom_boxplot(color="black", fill="#0072B2", alpha = 0.8)+
+  labs(x = "Residue", y ="Average Fitness (LogFC)",color="")+ 
+  scale_x_discrete(name ="Residue type",
+                   labels=c("Wildtype E. coli \nDHFR Homolog","All Remaining \nDHFR Homologs"))+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+WT_fit_plot15
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="BMS/PLOTS/Complementation/Summary/Lib15_Complementation_WT_vs_other_fitness.pdf", 
+       plot=WT_fit_plot15,
+       width=6, height=5, units="in")
+```
+
+Summary Stats for WT E. coli DHFR homolog and All remaining DHFR homologs:
+```{r class.output="goodCode"}
+### WT Summary Stats
+
+# WT Mean Fitness
+mean(as.numeric(unlist(BMS_matrix15_perfects_and_1_melt %>% filter(WTcolor=="red") %>% dplyr::select(value))))
+# WT Median Fitness
+median(as.numeric(unlist(BMS_matrix15_perfects_and_1_melt %>% filter(WTcolor=="red") %>% dplyr::select(value))))
+# WT SD Fitness
+sd(as.numeric(unlist(BMS_matrix15_perfects_and_1_melt %>% filter(WTcolor=="red") %>% dplyr::select(value))))
+
+### Non-WT Summary Stats
+
+# Non-WT Mean Fitness
+mean(as.numeric(unlist(BMS_matrix15_perfects_and_1_melt %>% filter(is.na(WTcolor) & !is.na(value)) %>% dplyr::select(value))))
+# Non-WT Median Fitness
+median(as.numeric(unlist(BMS_matrix15_perfects_and_1_melt %>% filter(is.na(WTcolor) & !is.na(value)) %>% dplyr::select(value))))
+# Non-WT SD Fitness
+sd(as.numeric(unlist(BMS_matrix15_perfects_and_1_melt %>% filter(is.na(WTcolor) & !is.na(value)) %>% dplyr::select(value))))
+```
+
+### BMS STD Plots
+
+Establish plotting parameters:
+```{r}
+# Import the BMS_matrix15 dataset based on 1 a.a. mutation:
+BMS_matrix15_perfects_and_1_sd_melt <- read.csv("BMS/OUTPUT/Complementation/BMS_matrix15_perfects_and_1_sd_melt.csv",
+                                                header = TRUE)
+
+
+BMS_matrix15_perfects_and_1_sd_melt <- BMS_matrix15_perfects_and_1_sd_melt %>%
+  filter(X1!="X")
+
+BMS_matrix15_perfects_and_1_sd_melt$aanum <- 0
+
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="A")] <- 12
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="C")] <- 10
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="D")] <- 5
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="E")] <- 4
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="F")] <- 19
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="G")] <- 11
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="H")] <- 3
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="I")] <- 15
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="K")] <- 1
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="L")] <- 14
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="M")] <- 16
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="N")] <- 6
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="P")] <- 17
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="Q")] <- 7
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="R")] <- 2
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="S")] <- 9
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="T")] <- 8
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="V")] <- 13
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="W")] <- 20
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="Y")] <- 18
+BMS_matrix15_perfects_and_1_sd_melt$aanum[which(BMS_matrix15_perfects_and_1_sd_melt$X1=="X")] <- 22.6
+```
+
+Plot the STD values of the BMS analysis:
+```{r}
+BMS_std_plot15 <- ggplot() +
+  #BMS matrix
+  geom_rect(data=BMS_matrix15_perfects_and_1_sd_melt,aes(xmin=X2, xmax=X2+1, ymin=aanum, ymax=aanum+1, fill=value))+
+  #WT seq
+  geom_rect(data=BMS_matrix15_perfects_and_1_melt_WT,aes(xmin=X2, xmax=X2+1, ymin=aanum, ymax=aanum+1), color="green",alpha=0)+
+  labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient2(low = "blue", high = "red", mid="gold",name="Std",na.value="grey", midpoint = 3, limit = c(0,1.1*max(BMS_matrix15_perfects_and_1_sd_melt$value))) +#
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.line=element_blank())
+
+BMS_std_plot15
+```
+
+```{r echo=FALSE}
+ggsave(file="BMS/PLOTS/Complementation/BMS_std_plot15.pdf", 
+       plot=BMS_std_plot15,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot epistatis:
+```{r}
+BMS_epistasis15 <- BMS_matrix15_perfects_and_1_sd_melt %>%
+  dplyr::rename(sd=value) %>%
+  inner_join(BMS_matrix15_perfects_and_1_num_melt, by=c("X1","X2")) %>%
+  dplyr::rename(num=value) %>%
+  filter(num>4)
+
+BMS_epistasis_std_plot15 <- ggplot() +
+  #BMS matrix
+  geom_rect(data=BMS_epistasis15,aes(xmin=X2, xmax=X2+1, ymin=aanum, ymax=aanum+1, fill=sd))+
+  #WT seq
+  geom_rect(data=BMS_matrix15_perfects_and_1_melt_WT,aes(xmin=X2, xmax=X2+1, ymin=aanum, ymax=aanum+1), color="green",alpha=0)+
+  geom_text(data=BMS_matrix15_perfects_and_1_melt[1:21,], aes(x=-1, y=aanum+0.5, label=X1), size=3.5)+
+  geom_text(data=data.frame(pos=seq(0,150,30)),aes(x=pos+0.5,y=0,label=pos))+
+  labs(x = "Position (aa)", y ="Amino acid",color="") +
+  scale_fill_gradient(low = "gold", high = "red", name="Std",na.value="grey", limit = c(3,1.1*max(BMS_epistasis15$sd))) +#
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.line=element_blank())
+
+BMS_epistasis_std_plot15
+```
+
+```{r echo=FALSE}
+ggsave(file="BMS/PLOTS/Complementation/BMS_epistasis_std_plot15.pdf", 
+       plot=BMS_epistasis_std_plot15,
+       width=13.3, height=6.5, units="in")
+```
+
+Plot potential epistatic interactions:
+```{r}
+BMS_epistasis15_pos <- BMS_epistasis15 %>%
+  group_by(X2) %>%
+  summarise(numaa=n(),meansd=mean(sd),stdsd=sd(sd))
+
+# ___
+ggplot(BMS_epistasis15_pos,aes(x=X2,y=numaa)) +
+  geom_point()+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+# ___
+ggplot(BMS_epistasis15_pos,aes(x=X2,y=meansd)) +
+  geom_point()+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+
+# ___
+ggplot(BMS_epistasis15_pos,aes(x=X2,y=stdsd)) +
+  geom_point()+
+  theme(title = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank()) +
+  panel_border(color = "black")
+```
+
+Save BMS Info as dataframe (and write to csv file):
+```{r}
+BMS_info15 <- right_join(BMS_matrix15_perfects_and_1_melt %>%
+                         select(X1,X2,value) %>%
+                         dplyr::rename(AA=X1,Pos=X2,avgfitness=value),
+                       BMS_matrix15_perfects_and_1_num_melt %>%
+                         select(X1,X2,value) %>%
+                         dplyr::rename(AA=X1,Pos=X2,numpoints=value),
+                       by=c("AA", "Pos"))
+
+BMS_info15 <- right_join(BMS_info15,
+                       BMS_matrix15_perfects_and_1_sd_melt%>%
+                         select(X1,X2,value) %>%
+                         dplyr::rename(AA=X1,Pos=X2,sd=value),
+                       by=c("AA", "Pos"))
+```
+
+```{r echo=FALSE}
+#save CSV
+write.table(BMS_info15, file = paste("BMS/OUTPUT/Complementation/BMS_info_L15_1aa_mutations.csv",sep=""), 
+            sep = ",", row.names = F,quote=F,col.names = T)
+```
+
+# Save BMS Files
+
+Save the formatted BMS files to import for downstream analyses
+```{r}
+# protein_info_1H1T
+write.csv(protein_info_1H1T, 
+          "BMS/bms_files_formatted/protein_info_1H1T.csv", row.names = FALSE)
+
+# BMS_matrix15_perfects_and_1_melt
+write.csv(BMS_matrix15_perfects_and_1_melt, 
+          "BMS/bms_files_formatted/BMS_matrix15_perfects_and_1_melt.csv", row.names = FALSE)
+
+# BMS_matrix15_perfects_and_1_num_melt
+write.csv(BMS_matrix15_perfects_and_1_num_melt, 
+          "BMS/bms_files_formatted/BMS_matrix15_perfects_and_1_num_melt.csv", row.names = FALSE)
+```
+
+# Reproducibility
+
+The session information is provided for full reproducibility.
+```{r}
+devtools::session_info()
+```
