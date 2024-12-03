@@ -549,6 +549,8 @@ ggsave(file="Dialout/DHFR_Dialout_Median_Fitness.pdf",
        dpi=600, width = 6, height = 6, units = "in")
 ```
 
+## Side-by-Side Plots
+
 Plot Fitness and Growth Rates side-by-side
 ```{r warning=FALSE}
 patch1 <- fitness.plot.v4 | fitness.plot.v3
@@ -642,6 +644,10 @@ ggsave(file="Dialout/DHFR_Dialout_Fitness_Growth_Stacked_Plots.pdf",
        dpi=600, width = 16, height = 4, units = "in")
 ```
 
+## Combined Plots
+
+### All Dial-outs
+
 Plot data together with separate y-axes
 ```{r class.output="goodCode"}
 # Function to create a dual-axis plot for each Construct
@@ -709,7 +715,85 @@ ggsave(file="Dialout/DHFR_Dialout_Fitness_Growth_Combined_Plots.pdf",
        dpi=600, width = 10, height = 10, units = "in")
 ```
 
-### Correlations
+### Pathogenic Dial-outs
+
+```{r}
+# Function to create a dual-axis plot for each Construct
+create_dual_axis_plot <- function(data, construct) {
+  # Remove M9-Supp media for WT-DHFR
+  if (construct == "WT-DHFR") {
+    data <- data %>% filter(!(Media == "M9-Supp"))
+  }
+  
+  fitness_data <- filter(data, assay_type == "Fitness")
+  growth_rate_data <- filter(data, assay_type == "Growth Rate")
+  
+  # Calculate the ratio for the secondary axis
+  ratio <- diff(range(fitness_data$value)) / diff(range(growth_rate_data$value))
+  
+  ggplot() +
+    # Fitness data
+    geom_line(data = fitness_data, aes(x = Media, y = value, group = 1), color = "blue") +
+    geom_point(data = fitness_data, aes(x = Media, y = value), color = "blue") +
+    # Growth Rate data
+    geom_line(data = growth_rate_data, aes(x = Media, y = value * ratio, group = 1), color = "red") +
+    geom_point(data = growth_rate_data, aes(x = Media, y = value * ratio), color = "red") +
+    # Horizontal line at y = -1 for Fitness
+    geom_hline(yintercept = -1, linetype = "dashed", color = "gray", size = 0.5) +
+    # Axes and labels
+    scale_y_continuous(
+      name = "Fitness",
+      sec.axis = sec_axis(~./ratio, name = "Growth Rate")
+    ) +
+    theme_classic() +
+    theme(
+      axis.line.y.right = element_line(color = "red"),
+      axis.ticks.y.right = element_line(color = "red"),
+      axis.text.y.right = element_text(color = "red"),
+      axis.title.y.right = element_text(color = "red"),
+      axis.line.y.left = element_line(color = "blue"),
+      axis.ticks.y.left = element_line(color = "blue"),
+      axis.text.y.left = element_text(color = "blue"),
+      axis.title.y.left = element_text(color = "blue"),
+      axis.text.x = element_text(angle=45, hjust=1),
+      axis.title.x = element_blank(),
+      plot.title = element_text(size=10, face="bold", hjust=0.5)
+    ) +
+    labs(title=paste(construct),
+         x="Media")
+}
+
+# Filter combined_data for the specific constructs and rename
+specific_constructs <- c("Bacillus cereus", "Streptococcus pneumoniae", "WT-DHFR")
+filtered_data <- combined_data %>%
+  filter(Construct %in% c("WP_000637209", "WP_000162453", "WT-DHFR")) %>%
+  mutate(Construct = case_when(
+    Construct == "WP_000637209" ~ "Bacillus cereus",
+    Construct == "WP_000162453" ~ "Streptococcus pneumoniae",
+    TRUE ~ Construct
+  ))
+
+# Generate a list of plots, one for each specified Construct
+plot_list <- filtered_data %>%
+  group_by(Construct) %>%
+  group_map(~ create_dual_axis_plot(.x, .y$Construct))
+
+# Arrange all plots in a grid
+grid_plot <- do.call(grid.arrange, c(plot_list, ncol=3))
+
+# Print the grid plot
+print(grid_plot)
+```
+
+```{r echo=FALSE}
+#save plot
+# For 12 samples
+ggsave(file="Dialout/DHFR_Pathogenic_Dialout_Fitness_Growth_Combined_Plots.pdf",
+       plot = grid_plot, 
+       dpi=600, width = 10, height = 3, units = "in")
+```
+
+## Correlations
 
 ```{r class.output="goodCode"}
 # First, let's reshape the data to have Fitness and Growth Rate side by side
@@ -767,6 +851,8 @@ ggsave(file="Dialout/DHFR_Dialout_Spearman_Correlations_Barplot.pdf",
        plot = correlation_plot, 
        dpi=600, width = 8, height = 4, units = "in")
 ```
+
+### Correlation Plots
 
 ```{r class.output="goodCode"}
 # Function to create a scatter plot for each media type

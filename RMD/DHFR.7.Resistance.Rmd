@@ -2514,6 +2514,691 @@ ggsave(file="Resistance/PLOTS/Final/Five.Taxa.All.png",
        dpi=600, width = 10, height = 15, units = "in")
 ```
 
+## Dial-out Validation
+
+Two of the pathogenic DHFR variants were also included in our Dial-out PCR verification analysis to measure growth rates independent of the multiplexed fitness assay.  These include Bacillus cereus and Streptococcus pneumoniae.
+
+### Bacillus cereus
+```{r}
+# Filter to only retain specific variants for the MSA
+Bacillus_dialout <- Bacillus %>%
+  filter(((mutID == "NP_831957") | 
+          (mutID == "WP_000637209")) & 
+         !is.na(fitD11D03))
+```
+
+Align the two variants and retain NP_831957 as the reference sequence
+```{r}
+# Create a function to write FASTA entries
+write_fasta <- function(id, seq, file) {
+  cat(paste0(">", id, "\n"), file = file, append = TRUE)
+  cat(paste0("M", seq, "\n"), file = file, append = TRUE)  # Add "M" at the beginning of the sequence
+}
+
+# Specify the output file name
+Bacillus_dialout_output_file <- "Resistance/FASTA/Bacillus.dialout.fasta"
+
+# Remove the file if it already exists
+if (file.exists(Bacillus_dialout_output_file)) {
+  file.remove(Bacillus_dialout_output_file)
+}
+
+# Write the FASTA entries to the file
+for (i in 1:nrow(Bacillus_dialout)) {
+  write_fasta(Bacillus_dialout$mutID[i], Bacillus_dialout$seq[i], Bacillus_dialout_output_file)
+}
+
+cat("FASTA file has been generated:", Bacillus_dialout_output_file, "\n")
+```
+
+Perform a multiple sequence alignment on the FASTA file using CLUSTAL Omega:
+```{bash}
+# May need to enable permissions to run the executable:
+#chmod +x clustalo
+./Scripts/clustalo -i Resistance/FASTA/Bacillus.dialout.fasta -o Resistance/FASTA/Bacillus.dialout.aligned.fasta --outfmt=fa --force
+```
+
+Import the MSA file and determine which amino acid positions differ between the samples
+```{r class.output="goodCode"}
+# Import the MSA file
+msa <- readAAMultipleAlignment("Resistance/FASTA/Bacillus.dialout.aligned.fasta", format="fasta")
+
+# Convert to a matrix for easier manipulation
+msa_matrix <- as.matrix(msa)
+
+# Set the reference sequence
+ref_seq <- "NP_831957"
+
+cat("Using reference sequence:", ref_seq, "\n")
+
+# Find positions where amino acids differ
+diff_positions <- which(apply(msa_matrix, 2, function(col) length(unique(col)) > 1))
+
+# Create a summary dataframe
+summary_df <- data.frame(
+  Position = diff_positions,
+  RefAA = msa_matrix[ref_seq, diff_positions],
+  stringsAsFactors = FALSE
+)
+
+# Add columns for each unique mutID
+unique_mutIDs <- setdiff(rownames(msa_matrix), ref_seq)
+for (mutID in unique_mutIDs) {
+  summary_df[[mutID]] <- msa_matrix[mutID, diff_positions]
+}
+
+# Add a column for the amino acid changes
+summary_df$Changes <- apply(summary_df, 1, function(row) {
+  changes <- setdiff(as.character(row[3:ncol(summary_df)]), row["RefAA"])
+  if (length(changes) > 0) {
+    paste(row["RefAA"], paste(changes, collapse = "/"), sep = "->")
+  } else {
+    "No change"
+  }
+})
+
+# Remove rows with "No change"
+summary_df <- summary_df[summary_df$Changes != "No change", ]
+
+# Reorder columns
+summary_df <- summary_df %>% 
+  select(Position, RefAA, Changes, everything())
+
+# Print the summary table
+print(summary_df, row.names = FALSE)
+```
+
+Arrange the data for the amino acid mutations heatmap:
+```{r}
+# Get all positions where there's a mutation
+all_positions <- sort(unique(summary_df$Position))
+
+# Reshape the data
+heatmap_data <- summary_df %>%
+  select(-Changes) %>%
+  pivot_longer(cols = -c(Position, RefAA), 
+               names_to = "mutID", 
+               values_to = "AA") %>%
+  mutate(Position = as.numeric(Position))
+
+# Add the reference sequence
+ref_data <- summary_df %>%
+  select(Position, RefAA) %>%
+  mutate(mutID = "NP_831957", AA = RefAA)
+
+heatmap_data <- bind_rows(ref_data, heatmap_data)
+
+# Create a function to compare amino acids
+compare_aa <- function(aa, ref_aa) {
+  ifelse(is.na(aa) | aa == "", "No data",
+         ifelse(aa == ref_aa, "No change", "Mutation"))
+}
+
+# Apply the comparison function and modify AA display
+heatmap_data <- heatmap_data %>%
+  group_by(Position) %>%
+  mutate(
+    Comparison = compare_aa(AA, AA[mutID == "NP_831957"]),
+    DisplayAA = case_when(
+      mutID == "NP_831957" ~ AA,
+      Comparison == "Mutation" ~ AA,
+      TRUE ~ ""
+    )
+  ) %>%
+  ungroup()
+
+# Create a continuous position variable
+heatmap_data <- heatmap_data %>%
+  arrange(Position) %>%
+  mutate(PositionIndex = as.numeric(factor(Position, levels = unique(Position))))
+
+# Create Bacillus_long
+Bacillus_long <- Bacillus_dialout %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD")
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+max_fitness <- Bacillus_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join max_fitness information and create MutantColor
+heatmap_data <- heatmap_data %>%
+  left_join(max_fitness, by = "mutID") %>%
+  mutate(MutantColor = case_when(
+    mutID == "NP_831957" ~ "red",
+    is.na(max_fitness) ~ "gray",
+    max_fitness < -1 ~ "darkblue",
+    max_fitness >= -1 ~ "gold2"
+  ))
+
+# Create a new column for ordering
+heatmap_data <- heatmap_data %>%
+  mutate(OrderGroup = case_when(
+    mutID == "NP_831957" ~ 1,
+    max_fitness >= -1 ~ 2,
+    max_fitness < -1 ~ 3,
+    TRUE ~ 4  # for any NA or other cases
+  ))
+```
+
+Heatmap for amino acid mutations by position based on reference sequence:
+```{r}
+# Order the data with reference on top
+heatmap_data <- heatmap_data %>%
+  arrange(OrderGroup, desc(max_fitness)) %>%
+  mutate(mutID = factor(mutID, levels = unique(mutID)))
+
+# Ensure the colors are assigned correctly
+y_colors <- heatmap_data %>%
+  distinct(mutID, MutantColor) %>%
+  arrange(match(mutID, levels(heatmap_data$mutID)))
+
+# Modify the heatmap_data to include the color information for mutations and text
+heatmap_data <- heatmap_data %>%
+  mutate(
+    MutationColor = case_when(
+      Comparison == "Mutation" & max_fitness >= -1 ~ "gold2",
+      Comparison == "Mutation" & max_fitness < -1 ~ "darkblue",
+      TRUE ~ Comparison
+    ),
+    TextColor = case_when(
+      MutationColor == "darkblue" ~ "white",
+      TRUE ~ "black"
+    )
+  )
+
+# Create the heatmap
+Bacillus.dialout.heatmap <- ggplot(heatmap_data, aes(x = PositionIndex, y = mutID, fill = MutationColor)) +
+  geom_tile(color = "white", width = 1, height = 0.9) +
+  scale_fill_manual(values = c("No change" = "gray90", "gold2" = "gold2", "darkblue" = "darkblue", "No data" = "white")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.grid.major.x = element_line(color = "white", size = 0.5),
+    panel.grid.major.y = element_line(color = "white", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(x = "Position", fill = "Amino Acid Change") +
+  scale_x_continuous(
+    breaks = heatmap_data$PositionIndex,
+    labels = heatmap_data$Position,
+    expand = c(0, 0)
+  ) +
+  geom_text(aes(label = DisplayAA, color = TextColor), size = 6, na.rm = TRUE, fontface = "bold") +
+  scale_color_identity() +
+  scale_y_discrete(limits = rev(levels(heatmap_data$mutID)), expand = c(0, 0))
+
+# Apply correct colors to y-axis labels
+Bacillus.dialout.heatmap <- Bacillus.dialout.heatmap +
+  theme(axis.text.y = element_text(color = rev(y_colors$MutantColor))) + 
+  ggtitle("Bacillus cereus") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+print(Bacillus.dialout.heatmap)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Bacillus.dialout.heatmap.png", 
+       plot=Bacillus.dialout.heatmap,
+       dpi=600, width = 7.5, height = 4.5, units = "in")
+```
+
+Plot the change in fitness across the TMP gradient for both samples:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Bacillus_dialout_long <- Bacillus_dialout %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(TMP, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+Bacillus_dialout_max_fitness <- Bacillus_dialout_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join this information back to the original data and color accordingly
+Bacillus_dialout_long <- Bacillus_dialout_long %>%
+  left_join(Bacillus_dialout_max_fitness, by = "mutID") %>%
+  mutate(Color = case_when(
+    mutID == "NP_831957" ~ "WT",
+    is.na(max_fitness) ~ "Mutant_Unknown",
+    max_fitness < -1 ~ "Mutant_Low",
+    max_fitness >= -1 ~ "Mutant_High"
+  ))
+
+# Reorder the levels of Color factor to plot WT last
+Bacillus_dialout_long$Color <- factor(Bacillus_dialout_long$Color, 
+                                   levels = c("Mutant_Unknown", "Mutant_Low", "Mutant_High", "WT"))
+
+# Separate WT and mutant data
+WT_data <- Bacillus_dialout_long %>% filter(mutID == "NP_831957")
+mutant_data <- Bacillus_dialout_long %>% filter(mutID != "NP_831957")
+```
+
+Fitness plotting over the TMP gradient
+```{r}
+# First, interpolate NA values
+mutant_data <- mutant_data %>%
+  group_by(mutID) %>%
+  arrange(Day) %>%
+  mutate(Fitness = na.approx(Fitness, x = Day, na.rm = FALSE)) %>%
+  ungroup()
+
+WT_data <- WT_data %>%
+  arrange(Day) %>%
+  mutate(Fitness = na.approx(Fitness, x = Day, na.rm = FALSE))
+
+# Then create the plot
+Bacillus_dialout_plot <- ggplot() +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  # Plot mutant lines first
+  geom_line(data = mutant_data, aes(x = Day, y = Fitness, group = mutID, color = Color), size = 1.0) +
+  geom_point(data = mutant_data, aes(x = Day, y = Fitness, color = Color), size = 3) +
+  # Plot WT line on top
+  geom_line(data = WT_data, aes(x = Day, y = Fitness, group = mutID), color = "red", size = 2.0) +
+  geom_point(data = WT_data, aes(x = Day, y = Fitness), color = "red", size = 3) +
+  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold", "Mutant_Unknown" = "gray")) +
+  scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none") + 
+  ggtitle("Bacillus cereus") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+# Print the plot
+print(Bacillus_dialout_plot)
+```
+
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Bacillus.dialout.fitness.png", 
+       plot=Bacillus_dialout_plot,
+       dpi=600, width = 4.5, height = 4.5, units = "in")
+```
+
+Plot together:
+```{r}
+patch22 <- Bacillus_dialout_plot | Bacillus.dialout.heatmap
+patch22
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Bacillus.Dialout.Both.png", 
+       plot=patch22,
+       dpi=600, width = 11, height = 5, units = "in")
+```
+
+### Streptococcus pnemoniae
+```{r}
+# Filter to only retain specific variants for the MSA
+Strep_dialout <- Streptococcus %>%
+  filter(((mutID == "WP_002205327") | 
+          (mutID == "WP_000162453")) & 
+         !is.na(fitD11D03))
+```
+
+Align the two variants and retain WP_002205327 as the reference sequence
+```{r}
+# Create a function to write FASTA entries
+write_fasta <- function(id, seq, file) {
+  cat(paste0(">", id, "\n"), file = file, append = TRUE)
+  cat(paste0("M", seq, "\n"), file = file, append = TRUE)  # Add "M" at the beginning of the sequence
+}
+
+# Specify the output file name
+Strep_dialout_output_file <- "Resistance/FASTA/Strep.dialout.fasta"
+
+# Remove the file if it already exists
+if (file.exists(Strep_dialout_output_file)) {
+  file.remove(Strep_dialout_output_file)
+}
+
+# Write the FASTA entries to the file
+for (i in 1:nrow(Strep_dialout)) {
+  write_fasta(Strep_dialout$mutID[i], Strep_dialout$seq[i], Strep_dialout_output_file)
+}
+
+cat("FASTA file has been generated:", Strep_dialout_output_file, "\n")
+```
+
+Perform a multiple sequence alignment on the FASTA file using CLUSTAL Omega:
+```{bash}
+# May need to enable permissions to run the executable:
+#chmod +x clustalo
+./Scripts/clustalo -i Resistance/FASTA/Strep.dialout.fasta -o Resistance/FASTA/Strep.dialout.aligned.fasta --outfmt=fa --force
+```
+
+Import the MSA file and determine which amino acid positions differ between the samples
+```{r class.output="goodCode"}
+# Import the MSA file
+msa <- readAAMultipleAlignment("Resistance/FASTA/Strep.dialout.aligned.fasta", format="fasta")
+
+# Convert to a matrix for easier manipulation
+msa_matrix <- as.matrix(msa)
+
+# Set the reference sequence
+ref_seq <- "WP_002205327"
+
+cat("Using reference sequence:", ref_seq, "\n")
+
+# Find positions where amino acids differ
+diff_positions <- which(apply(msa_matrix, 2, function(col) length(unique(col)) > 1))
+
+# Create a summary dataframe
+summary_df <- data.frame(
+  Position = diff_positions,
+  RefAA = msa_matrix[ref_seq, diff_positions],
+  stringsAsFactors = FALSE
+)
+
+# Add columns for each unique mutID
+unique_mutIDs <- setdiff(rownames(msa_matrix), ref_seq)
+for (mutID in unique_mutIDs) {
+  summary_df[[mutID]] <- msa_matrix[mutID, diff_positions]
+}
+
+# Add a column for the amino acid changes
+summary_df$Changes <- apply(summary_df, 1, function(row) {
+  changes <- setdiff(as.character(row[3:ncol(summary_df)]), row["RefAA"])
+  if (length(changes) > 0) {
+    paste(row["RefAA"], paste(changes, collapse = "/"), sep = "->")
+  } else {
+    "No change"
+  }
+})
+
+# Remove rows with "No change"
+summary_df <- summary_df[summary_df$Changes != "No change", ]
+
+# Reorder columns
+summary_df <- summary_df %>% 
+  select(Position, RefAA, Changes, everything())
+
+# Print the summary table
+print(summary_df, row.names = FALSE)
+```
+
+Arrange the data for the amino acid mutations heatmap:
+```{r}
+# Get all positions where there's a mutation
+all_positions <- sort(unique(summary_df$Position))
+
+# Reshape the data
+heatmap_data <- summary_df %>%
+  select(-Changes) %>%
+  pivot_longer(cols = -c(Position, RefAA), 
+               names_to = "mutID", 
+               values_to = "AA") %>%
+  mutate(Position = as.numeric(Position))
+
+# Add the reference sequence
+ref_data <- summary_df %>%
+  select(Position, RefAA) %>%
+  mutate(mutID = "WP_002205327", AA = RefAA)
+
+heatmap_data <- bind_rows(ref_data, heatmap_data)
+
+# Create a function to compare amino acids
+compare_aa <- function(aa, ref_aa) {
+  ifelse(is.na(aa) | aa == "", "No data",
+         ifelse(aa == ref_aa, "No change", "Mutation"))
+}
+
+# Apply the comparison function and modify AA display
+heatmap_data <- heatmap_data %>%
+  group_by(Position) %>%
+  mutate(
+    Comparison = compare_aa(AA, AA[mutID == "WP_002205327"]),
+    DisplayAA = case_when(
+      mutID == "WP_002205327" ~ AA,
+      Comparison == "Mutation" ~ AA,
+      TRUE ~ ""
+    )
+  ) %>%
+  ungroup()
+
+# Create a continuous position variable
+heatmap_data <- heatmap_data %>%
+  arrange(Position) %>%
+  mutate(PositionIndex = as.numeric(factor(Position, levels = unique(Position))))
+
+# Create Strep_long
+Strep_long <- Strep_dialout %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD")
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+max_fitness <- Strep_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join max_fitness information and create MutantColor
+heatmap_data <- heatmap_data %>%
+  left_join(max_fitness, by = "mutID") %>%
+  mutate(MutantColor = case_when(
+    mutID == "WP_002205327" ~ "red",
+    is.na(max_fitness) ~ "gray",
+    max_fitness < -1 ~ "darkblue",
+    max_fitness >= -1 ~ "gold2"
+  ))
+
+# Create a new column for ordering
+heatmap_data <- heatmap_data %>%
+  mutate(OrderGroup = case_when(
+    mutID == "WP_002205327" ~ 1,
+    max_fitness >= -1 ~ 2,
+    max_fitness < -1 ~ 3,
+    TRUE ~ 4  # for any NA or other cases
+  ))
+```
+
+Heatmap for amino acid mutations by position based on reference sequence:
+```{r}
+# Order the data with reference on top
+heatmap_data <- heatmap_data %>%
+  arrange(OrderGroup, desc(max_fitness)) %>%
+  mutate(mutID = factor(mutID, levels = unique(mutID)))
+
+# Ensure the colors are assigned correctly
+y_colors <- heatmap_data %>%
+  distinct(mutID, MutantColor) %>%
+  arrange(match(mutID, levels(heatmap_data$mutID)))
+
+# Modify the heatmap_data to include the color information for mutations and text
+heatmap_data <- heatmap_data %>%
+  mutate(
+    MutationColor = case_when(
+      Comparison == "Mutation" & max_fitness >= -1 ~ "gold2",
+      Comparison == "Mutation" & max_fitness < -1 ~ "darkblue",
+      TRUE ~ Comparison
+    ),
+    TextColor = case_when(
+      MutationColor == "darkblue" ~ "white",
+      TRUE ~ "black"
+    )
+  )
+
+# Create the heatmap
+Strep.dialout.heatmap <- ggplot(heatmap_data, aes(x = PositionIndex, y = mutID, fill = MutationColor)) +
+  geom_tile(color = "white", width = 1, height = 0.9) +
+  scale_fill_manual(values = c("No change" = "gray90", "gold2" = "gold2", "darkblue" = "darkblue", "No data" = "white")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    panel.grid.major.x = element_line(color = "white", size = 0.5),
+    panel.grid.major.y = element_line(color = "white", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(x = "Position", fill = "Amino Acid Change") +
+  scale_x_continuous(
+    breaks = heatmap_data$PositionIndex,
+    labels = heatmap_data$Position,
+    expand = c(0, 0)
+  ) +
+  geom_text(aes(label = DisplayAA, color = TextColor), size = 6, na.rm = TRUE, fontface = "bold") +
+  scale_color_identity() +
+  scale_y_discrete(limits = rev(levels(heatmap_data$mutID)), expand = c(0, 0))
+
+# Apply correct colors to y-axis labels
+Strep.dialout.heatmap <- Strep.dialout.heatmap +
+  theme(axis.text.y = element_text(color = rev(y_colors$MutantColor))) + 
+  ggtitle("Streptococcus pneumoniae") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+print(Strep.dialout.heatmap)
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Strep.dialout.heatmap.png", 
+       plot=Strep.dialout.heatmap,
+       dpi=600, width = 7.5, height = 4.5, units = "in")
+```
+
+Plot the change in fitness across the TMP gradient for both samples:
+```{r warning=FALSE}
+# Reshape the data from wide to long format
+Strep_dialout_long <- Strep_dialout %>%
+  pivot_longer(cols = starts_with("fitD"), 
+               names_to = "TMP", 
+               values_to = "Fitness",
+               names_prefix = "fitD") %>%
+  mutate(Day = factor(TMP, levels = c("05D03", "06D03", "07D03", "08D03", "09D03", "10D03", "11D03"),
+                      labels = c("0", "0.058", "0.5", "1.0", "10", "50", "200")))
+
+# Calculate the fitness at the highest TMP concentration for each mutID
+Strep_dialout_max_fitness <- Strep_dialout_long %>%
+  filter(TMP == "11D03") %>%
+  select(mutID, max_fitness = Fitness)
+
+# Join this information back to the original data and color accordingly
+Strep_dialout_long <- Strep_dialout_long %>%
+  left_join(Strep_dialout_max_fitness, by = "mutID") %>%
+  mutate(Color = case_when(
+    mutID == "WP_002205327" ~ "WT",
+    is.na(max_fitness) ~ "Mutant_Unknown",
+    max_fitness < -1 ~ "Mutant_Low",
+    max_fitness >= -1 ~ "Mutant_High"
+  ))
+
+# Reorder the levels of Color factor to plot WT last
+Strep_dialout_long$Color <- factor(Strep_dialout_long$Color, 
+                                   levels = c("Mutant_Unknown", "Mutant_Low", "Mutant_High", "WT"))
+
+# Separate WT and mutant data
+WT_data <- Strep_dialout_long %>% filter(mutID == "WP_002205327")
+mutant_data <- Strep_dialout_long %>% filter(mutID != "WP_002205327")
+```
+
+Fitness plotting over the TMP gradient
+```{r}
+# First, interpolate NA values
+mutant_data <- mutant_data %>%
+  group_by(mutID) %>%
+  arrange(Day) %>%
+  mutate(Fitness = na.approx(Fitness, x = Day, na.rm = FALSE)) %>%
+  ungroup()
+
+WT_data <- WT_data %>%
+  arrange(Day) %>%
+  mutate(Fitness = na.approx(Fitness, x = Day, na.rm = FALSE))
+
+# Then create the plot
+Strep_dialout_plot <- ggplot() +
+  geom_hline(yintercept = -1, linetype = "dashed", color = "gray50") +
+  # Plot mutant lines first
+  geom_line(data = mutant_data, aes(x = Day, y = Fitness, group = mutID, color = Color), size = 1.0) +
+  geom_point(data = mutant_data, aes(x = Day, y = Fitness, color = Color), size = 3) +
+  # Plot WT line on top
+  geom_line(data = WT_data, aes(x = Day, y = Fitness, group = mutID), color = "red", size = 2.0) +
+  geom_point(data = WT_data, aes(x = Day, y = Fitness), color = "red", size = 3) +
+  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold", "Mutant_Unknown" = "gray")) +
+  scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
+  labs(x = "Trimethoprim (ug/mL)",
+       y = "Median Fitness (LogFC)") +
+  theme_minimal() +
+  theme(
+    axis.line = element_line(colour = 'black', size = 1.0),
+    axis.ticks = element_line(colour = "black", size = 1.0),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none") + 
+  ggtitle("Streptococcus pneumoniae") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "italic", size = 16))
+
+# Print the plot
+print(Strep_dialout_plot)
+```
+
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Strep.dialout.fitness.png", 
+       plot=Strep_dialout_plot,
+       dpi=600, width = 4.5, height = 4.5, units = "in")
+```
+
+Plot together:
+```{r}
+patch23 <- Strep_dialout_plot | Strep.dialout.heatmap
+patch23
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Strep.Dialout.Both.png", 
+       plot=patch23,
+       dpi=600, width = 11, height = 5, units = "in")
+```
+
+Plot both pathogenic variants together:
+```{r}
+patch24 <- (Bacillus_dialout_plot | Bacillus.dialout.heatmap) / (Strep_dialout_plot | Strep.dialout.heatmap)
+patch24
+```
+
+```{r echo=FALSE}
+# PNG
+ggsave(file="Resistance/PLOTS/Final/Pathogenic.Bacillus.Streptococcus.Dialout.Both.png", 
+       plot=patch24,
+       dpi=600, width = 11, height = 10, units = "in")
+```
+
 # Reproducibility
 
 The session information is provided for full reproducibility.
