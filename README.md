@@ -5,7 +5,7 @@ _____________________________________
 
 This GitHub repository hosts R Markdown (RMD) files and links to the rendered code for reproducing the data analysis in the following preprint:
 
-Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. (2025) Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***. []().
+Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. (2025) Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***. []()
 
 **Links to Rendered Code:**
 
