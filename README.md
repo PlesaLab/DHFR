@@ -5,7 +5,7 @@ _____________________________________
 
 This GitHub repository hosts R Markdown (RMD) files and links to the rendered code for reproducing the data analysis in the following preprint:
 
-Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. (2025) ***Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning.*** [bioRxiv]().
+Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. (2025) Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***. []().
 
 **Links to Rendered Code:**
 
@@ -13,17 +13,17 @@ Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. (2025) ***Exploring Antibiotic
 
 [Sequencing Counts Analysis](https://rpubs.com/kjromano/dhfr_counts_rmd)
 
-[Perfect Homologs Analysis]()
+[Perfect Homologs Analysis](https://rpubs.com/kjromano/dhfr_perfects_rmd)
 
-[Mutant Homologs Analysis]()
+[Mutant Homologs Analysis](https://rpubs.com/kjromano/dhfr_mutants_rmd)
 
-[Broad Mutational Scanning Analysis]()
+[Broad Mutational Scanning Analysis](https://rpubs.com/kjromano/dhfr_bms_rmd)
 
-[Gain-of-Function Mutants Analysis]()
+[Gain-of-Function Mutants Analysis](https://rpubs.com/kjromano/dhfr_gof_rmd)
 
-[Resistant Taxa Fitness Analysis]()
+[Resistant Taxa Fitness Analysis](https://rpubs.com/kjromano/dhfr_resistance_rmd)
 
-[Dialout Variants Fitness Analysis]()
+[Dialout Variants Fitness Analysis](https://rpubs.com/kjromano/dhfr_dialout_rmd)
 
 **NCBI BioProject:** [PRJNA1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478) for raw .fastq files
 
