@@ -18,9 +18,9 @@ output:
     toc_depth: '5'
 ---
 
-<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+**R Notebook:** <font color="green">Provides reproducible analysis for **Resistant Taxa** in the following manuscript:</font>
 
-**Preprint (biorXiv):** []()
+**Citation:** Romanowicz KJ, Resnick C, Hinton SR, Plesa C. (2025) Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***. []()
 
 **GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
 
@@ -28,7 +28,7 @@ output:
 
 # Experiment
 
-This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants, with two-fold redundancy (two codon variants per sequence). Fitness scores are derived from a multiplexed in-vivo assay using a trimethoprim concentration gradient, assessing the ability of these homologs and their mutants to complement functionality in an *E. coli* knockout strain and their tolerance to trimethoprim treatment. This analysis provides insights into how antibiotic resistance evolves across a range of evolutionary starting points. Sequence data were generated using the Illumina NovaSeq platform with 100 bp paired-end sequencing of amplicons.
 
 ![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
 
@@ -1728,7 +1728,7 @@ Streptococcus_plot <- ggplot() +
   # Plot WT line on top
   geom_line(data = WT_data, aes(x = Day, y = Fitness, group = mutID), color = "red", size = 2.0) +
   geom_point(data = WT_data, aes(x = Day, y = Fitness), color = "red", size = 3) +
-  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold", "Mutant_Unknown" = "gray")) +
+  scale_color_manual(values = c("Mutant_Low" = "darkblue", "Mutant_High" = "gold2", "Mutant_Unknown" = "gray")) +
   scale_x_discrete(limits = c("0", "0.058", "0.5", "1.0", "10", "50", "200")) +
   labs(x = "Trimethoprim (ug/mL)",
        y = "Median Fitness (LogFC)") +
@@ -1770,7 +1770,6 @@ ggsave(file="Resistance/PLOTS/Final/Streptococcus.Both.png",
        plot=patch1,
        dpi=600, width = 11, height = 5, units = "in")
 ```
-
 
 ### Bacillus cereus
 

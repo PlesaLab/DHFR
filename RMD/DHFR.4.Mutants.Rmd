@@ -18,9 +18,9 @@ output:
     toc_depth: '5'
 ---
 
-<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+**R Notebook:** <font color="green">Provides reproducible analysis for **Mutant Variants** in the following manuscript:</font>
 
-**Preprint (biorXiv):** []()
+**Citation:** Romanowicz KJ, Resnick C, Hinton SR, Plesa C. Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***, 2025. []()
 
 **GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
 
@@ -28,7 +28,7 @@ output:
 
 # Experiment
 
-This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants, with two-fold redundancy (two codon variants per sequence). Fitness scores are derived from a multiplexed in-vivo assay using a trimethoprim concentration gradient, assessing the ability of these homologs and their mutants to complement functionality in an *E. coli* knockout strain and their tolerance to trimethoprim treatment. This analysis provides insights into how antibiotic resistance evolves across a range of evolutionary starting points. Sequence data were generated using the Illumina NovaSeq platform with 100 bp paired-end sequencing of amplicons.
 
 ![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
 
@@ -398,8 +398,9 @@ L15.pie_chart <- ggplot(L15.pie_data, aes(x = 1, y = D05_pct, fill = condition))
   labs(title = "Distribution of Mutation Groups \nfor Complementation (Codon 1)",
        fill = "Mutation Group") +
   theme_void() +
-  theme(legend.title = element_text(size = 12),
-        legend.text = element_text(size = 10)) +
+  theme(plot.title = element_text(size = 24),
+        legend.title = element_text(size = 24),
+        legend.text = element_text(size = 22)) +
   scale_fill_manual(values = L15.blue_palette, labels = L15.pie_data$label) +
   scale_y_continuous(labels = percent_format())
 
@@ -409,7 +410,7 @@ print(L15.pie_chart)
 
 ```{r echo=FALSE}
 # Save the pie chart
-ggsave("Mutants/PLOTS/L15.percent_sum_D05_pie_chart_blue.png", 
+ggsave("Mutants/PLOTS/L15.percent_sum_D05_pie_chart_blue.v2.png", 
        L15.pie_chart, width = 10, height = 8, dpi = 300)
 ```
 
@@ -635,8 +636,9 @@ L16.pie_chart <- ggplot(L16.pie_data, aes(x = 1, y = D12_pct, fill = condition))
   labs(title = "Distribution of Mutation Groups \nfor Complementation (Codon 2)",
        fill = "Mutation Group") +
   theme_void() +
-  theme(legend.title = element_text(size = 12),
-        legend.text = element_text(size = 10)) +
+  theme(plot.title = element_text(size = 24),
+        legend.title = element_text(size = 24),
+        legend.text = element_text(size = 22)) +
   scale_fill_manual(values = L16.orange_palette, labels = L16.pie_data$label) +
   scale_y_continuous(labels = percent_format())
 
@@ -646,7 +648,7 @@ print(L16.pie_chart)
 
 ```{r echo=FALSE}
 # Save the pie chart
-ggsave("Mutants/PLOTS/L16.percent_sum_D12_pie_chart_orange.png", 
+ggsave("Mutants/PLOTS/L16.percent_sum_D12_pie_chart_orange.v2.png", 
        L16.pie_chart, width = 10, height = 8, dpi = 300)
 ```
 
@@ -659,7 +661,7 @@ patch1
 
 ```{r echo=FALSE}
 # Save the pie chart
-ggsave("Mutants/PLOTS/Lib15.16.percent.sum.pie.chart.complementation.png", 
+ggsave("Mutants/PLOTS/Lib15.16.percent.sum.pie.chart.complementation.v2.png", 
        patch1, width = 12, height = 8, dpi = 300)
 ```
 
@@ -3770,7 +3772,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_com
 
 # Define a logical condition for false positives (fitD05D03 > -1 are false positives)
 false_positives_comp <- filtered_mutant_data_comp %>%
-  filter(fitD05D03 > -1, numprunedBCs > 1)
+  filter(fitD05D03 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at Complementation (fitD05D03 > -1):", nrow(false_positives_comp)))
 
 # Calculate the number of false positives
@@ -3797,7 +3799,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_MIC
 
 # Define a logical condition for false positives (fitD05D03 > -1 are false positives)
 false_positives_MIC <- filtered_mutant_data_MIC %>%
-  filter(fitD07D03 > -1, numprunedBCs > 1)
+  filter(fitD07D03 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at MIC (fitD07D03 > -1):", nrow(false_positives_MIC)))
 
 # Calculate the number of false positives
@@ -3824,7 +3826,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_400
 
 # Define a logical condition for false positives (fitD05D03 > -1 are false positives)
 false_positives_400xMIC <- filtered_mutant_data_400xMIC %>%
-  filter(fitD11D03 > -1, numprunedBCs > 1)
+  filter(fitD11D03 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at 400x MIC (fitD11D03 > -1):", nrow(false_positives_400xMIC)))
 
 # Calculate the number of false positives
@@ -3851,7 +3853,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_M9)
 
 # Define a logical condition for false positives (fitD05D03 > -1 are false positives)
 false_positives_M9 <- filtered_mutant_data_M9 %>%
-  filter(fitD03D01 > -1, numprunedBCs > 1)
+  filter(fitD03D01 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at M9-Supp (fitD03D01 > -1):", nrow(false_positives_M9)))
 
 # Calculate the number of false positives
@@ -3882,7 +3884,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_com
 
 # Define a logical condition for false positives (fitD05D03 > -1 are false positives)
 false_positives_comp_16 <- filtered_mutant_data_comp_16 %>%
-  filter(fitD12D04 > -1, numprunedBCs > 1)
+  filter(fitD12D04 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at Complementation (fitD12D04 > -1):", nrow(false_positives_comp_16)))
 
 # Calculate the number of false positives
@@ -3909,7 +3911,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_MIC
 
 # Define a logical condition for false positives (fitE02D04 > -1 are false positives)
 false_positives_MIC_16 <- filtered_mutant_data_MIC_16 %>%
-  filter(fitE02D04 > -1, numprunedBCs > 1)
+  filter(fitE02D04 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at MIC (fitE02D04 > -1):", nrow(false_positives_MIC_16)))
 
 # Calculate the number of false positives
@@ -3936,7 +3938,7 @@ print(paste("Number of rows with mutations > 49:", nrow(filtered_mutant_data_400
 
 # Define a logical condition for false positives (fitE06D04 > -1 are false positives)
 false_positives_400xMIC_16 <- filtered_mutant_data_400xMIC_16 %>%
-  filter(fitE06D04 > -1, numprunedBCs > 1)
+  filter(fitE06D04 > -1, numprunedBCs > 5)
 print(paste("Number of false positives at 400x MIC (fitE06D04 > -1):", nrow(false_positives_400xMIC_16)))
 
 # Calculate the number of false positives
@@ -3954,6 +3956,197 @@ false_positive_rate_400xMIC_16 <- (num_false_positives_400xMIC_16 / total_criter
 print(paste("False positive rate at 400x MIC:", round(false_positive_rate_400xMIC_16, 2), "%"))
 ```
 
+## Resistance Mutations
+
+### Median Mutations
+Here we determine if the resistant mutants at the highest TMP concentrations tend to have more mutations compared to mutants at lower TMP levels. What does the relationship of median number of mutations versus TMP concentration look like?
+```{r}
+### Lib15 - Codon 1
+
+## Complementation
+
+# Subset the 'mutants15' dataset to retain only those unique mutants (mutID) with fitness > -1 at fitD05D03. Filter out perfects:
+L15_resist_mutants_comp <- mutants15 %>%
+  filter(fitD05D03 > -1) %>%
+  filter(mutations > 0) %>%
+  distinct(mutID, .keep_all = TRUE)
+
+# Count the number of unique mutID retained
+L15_resist_mutants_comp_unique <- n_distinct(L15_resist_mutants_comp$mutID)
+
+# Now, calculate the median mutations
+L15_resist_mutants_comp_median <- median(L15_resist_mutants_comp$mutations, na.rm = TRUE)
+
+## MIC
+
+# Subset the 'mutants15' dataset to retain only those unique mutants (mutID) with fitness > -1 at fitD05D03. Filter out perfects:
+L15_resist_mutants_mic <- mutants15 %>%
+  filter(fitD07D03 > -1) %>%
+  filter(mutations > 0) %>%
+  distinct(mutID, .keep_all = TRUE)
+
+# Count the number of unique mutID retained
+L15_resist_mutants_mic_unique <- n_distinct(L15_resist_mutants_mic$mutID)
+
+# Now, calculate the median mutations
+L15_resist_mutants_mic_median <- median(L15_resist_mutants_mic$mutations, na.rm = TRUE)
+
+## 400x MIC
+
+# Subset the 'mutants15' dataset to retain only those unique mutants (mutID) with fitness > -1 at fitD05D03. Filter out perfects:
+L15_resist_mutants_400xmic <- mutants15 %>%
+  filter(fitD11D03 > -1) %>%
+  filter(mutations > 0) %>%
+  distinct(mutID, .keep_all = TRUE)
+
+# Count the number of unique mutID retained
+L15_resist_mutants_400xmic_unique <- n_distinct(L15_resist_mutants_400xmic$mutID)
+
+# Now, calculate the median mutations
+L15_resist_mutants_400xmic_median <- median(L15_resist_mutants_400xmic$mutations, na.rm = TRUE)
+
+# Print the result
+
+print(paste("The number of unique resistant mutID at Complementation is:", L15_resist_mutants_comp_unique))
+print(paste("The number of unique resistant mutID at MIC is:", L15_resist_mutants_mic_unique))
+print(paste("The number of unique resistant mutID at 400x is:", L15_resist_mutants_400xmic_unique))
+
+print(paste("The median number of mutations at Complementation is:", L15_resist_mutants_comp_median))
+print(paste("The median number of mutations at MIC is:", L15_resist_mutants_mic_median))
+print(paste("The median number of mutations at 400x MIC is:", L15_resist_mutants_400xmic_median))
+```
+
+### Plotting Mutation Distributions
+```{r}
+# Create bins for mutations
+max_mutations <- max(L15_resist_mutants_comp$mutations, na.rm = TRUE)
+breaks <- seq(0, max_mutations + 10, by = 10)
+
+# Adjust labels to match the number of bins
+labels <- paste(head(breaks, -1) + 1, tail(breaks, -1), sep = "-")
+
+L15_resist_mutants_comp_bins <- L15_resist_mutants_comp %>%
+  mutate(mutation_bins = cut(mutations, breaks = breaks, 
+                              right = FALSE, 
+                              labels = labels))
+
+# Plot the distribution of mutations
+L15_resist_mutants_comp_bins_plot <- ggplot(L15_resist_mutants_comp_bins, aes(x = mutation_bins)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Mutations After Filtering",
+       x = "Number of Mutations (Binned)",
+       y = "Count of Unique mutID") +
+  theme_minimal()
+
+print(L15_resist_mutants_comp_bins_plot)
+```
+
+```{r}
+# Filter for mutations between 1 and 10
+L15_resist_mutants_comp_1_10_filtered <- L15_resist_mutants_comp %>%
+  filter(mutations >= 1 & mutations <= 10)
+
+# Plot the distribution of mutations between 1 and 10
+L15_resist_mutants_comp_1_10_filtered_plot <- ggplot(L15_resist_mutants_comp_1_10_filtered, aes(x = mutations)) +
+  geom_bar(fill = "skyblue", color = "black", width = 0.7) +
+  labs(title = "Distribution of Mutations (1 to 10)",
+       x = "Number of Mutations",
+       y = "Count of Unique mutID") +
+  scale_x_continuous(breaks = seq(1, 10, by = 1)) + # Set x-axis breaks for clarity
+  theme_minimal()
+
+print(L15_resist_mutants_comp_1_10_filtered_plot)
+```
+
+```{r}
+patch12 <- L15_resist_mutants_comp_bins_plot / L15_resist_mutants_comp_1_10_filtered_plot
+patch12
+```
+
+```{r echo=FALSE}
+ggsave(file="Mutants/PLOTS/Lib15.resistant.mutations.distribution.complementation.png",
+       plot=patch12,
+       dpi=600, width = 10, height = 10, units = "in")
+```
+
+### Mutation Ratio
+To calculate the ratio of single mutations (where mutations == 1) to the number of mutants with 2 to 10 mutations, you can follow these steps in R:
+  - Count the number of unique mutants with exactly one mutation.
+  - Count the number of unique mutants with mutations between 2 and 10.
+  - Calculate the ratio.
+
+```{r}
+### Comp
+
+# Count single mutations (mutations == 1)
+single_mutations_comp_count <- L15_resist_mutants_comp %>%
+  filter(mutations == 1) %>%
+  pull(mutID) %>%
+  n_distinct()
+
+# Count mutants with mutations between 2 and 10
+mutants_2_to_10_comp_count <- L15_resist_mutants_comp %>%
+  filter(mutations >= 2 & mutations <= 10) %>%
+  pull(mutID) %>%
+  n_distinct()
+
+# Calculate the ratio
+if (mutants_2_to_10_comp_count > 0) {
+  mutation_ratio_comp <- single_mutations_comp_count / mutants_2_to_10_comp_count
+} else {
+  mutation_ratio_comp <- NA # Avoid division by zero if there are no mutants with 2-10 mutations
+}
+
+### MIC
+
+# Count single mutations (mutations == 1)
+single_mutations_mic_count <- L15_resist_mutants_mic %>%
+  filter(mutations == 1) %>%
+  pull(mutID) %>%
+  n_distinct()
+
+# Count mutants with mutations between 2 and 10
+mutants_2_to_10_mic_count <- L15_resist_mutants_mic %>%
+  filter(mutations >= 2 & mutations <= 10) %>%
+  pull(mutID) %>%
+  n_distinct()
+
+# Calculate the ratio
+if (mutants_2_to_10_mic_count > 0) {
+  mutation_ratio_mic <- single_mutations_mic_count / mutants_2_to_10_mic_count
+} else {
+  mutation_ratio_mic <- NA # Avoid division by zero if there are no mutants with 2-10 mutations
+}
+
+### 400x MIC
+
+# Count single mutations (mutations == 1)
+single_mutations_400xmic_count <- L15_resist_mutants_400xmic %>%
+  filter(mutations == 1) %>%
+  pull(mutID) %>%
+  n_distinct()
+
+# Count mutants with mutations between 2 and 10
+mutants_2_to_10_400xmic_count <- L15_resist_mutants_400xmic %>%
+  filter(mutations >= 2 & mutations <= 10) %>%
+  pull(mutID) %>%
+  n_distinct()
+
+# Calculate the ratio
+if (mutants_2_to_10_400xmic_count > 0) {
+  mutation_ratio_400xmic <- single_mutations_400xmic_count / mutants_2_to_10_400xmic_count
+} else {
+  mutation_ratio_400xmic <- NA # Avoid division by zero if there are no mutants with 2-10 mutations
+}
+
+
+
+# Print the result
+print(paste("The ratio of single mutations to mutants with 2-10 mutations at Complementation is:", mutation_ratio_comp))
+print(paste("The ratio of single mutations to mutants with 2-10 mutations at MIC is:", mutation_ratio_mic))
+print(paste("The ratio of single mutations to mutants with 2-10 mutations at 400x MIC is:", mutation_ratio_400xmic))
+```
+  
 # Save Mutants Files
 
 Save the formatted mutants files to import for downstream analyses

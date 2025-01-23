@@ -18,9 +18,9 @@ output:
     toc_depth: '5'
 ---
 
-<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+**R Notebook:** <font color="green">Provides reproducible analysis for **Count Files** in the following manuscript:</font>
 
-**Preprint (biorXiv):** []()
+**Citation:** Romanowicz KJ, Resnick C, Hinton SR, Plesa C. Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***, 2025. []()
 
 **GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
 
@@ -28,7 +28,7 @@ output:
 
 # Experiment
 
-This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants, with two-fold redundancy (two codon variants per sequence). Fitness scores are derived from a multiplexed in-vivo assay using a trimethoprim concentration gradient, assessing the ability of these homologs and their mutants to complement functionality in an E. coli knockout strain and their tolerance to trimethoprim treatment. This analysis provides insights into how antibiotic resistance evolves across a range of evolutionary starting points. Sequence data were generated using the Illumina NovaSeq platform with 100 bp paired-end sequencing of amplicons.
 
 ![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
 
@@ -677,13 +677,12 @@ merged_norm_frac_read_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = frac
   theme_minimal() + 
   theme(
     axis.line = element_line(colour = 'black', size = 0.5), 
-    axis.ticks = element_line(colour = "black", size = 0.5), 
-    plot.title = element_text(size = 14, hjust = 0.5), 
-    axis.text.x = element_text(size = 12), 
-    axis.text.y = element_text(size = 12), 
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    axis.text.x = element_text(size = 16), 
+    axis.text.y = element_text(size = 16), 
     panel.background = element_blank(), 
-    axis.title.x = element_text(size = 12), 
-    axis.title.y = element_text(size = 16), 
+    axis.title.x = element_text(size = 20), 
+    axis.title.y = element_text(size = 20), 
     panel.grid.major = element_blank(), 
     panel.grid.minor = element_blank(),
     legend.position = "none"
@@ -704,13 +703,12 @@ merged_norm_frac_BC_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = frac_m
   theme_minimal() + 
   theme(
     axis.line = element_line(colour = 'black', size = 0.5), 
-    axis.ticks = element_line(colour = "black", size = 0.5), 
-    plot.title = element_text(size = 14, hjust = 0.5), 
-    axis.text.x = element_text(size = 12), 
-    axis.text.y = element_text(size = 12), 
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    axis.text.x = element_text(size = 16), 
+    axis.text.y = element_text(size = 16), 
     panel.background = element_blank(), 
-    axis.title.x = element_text(size = 12), 
-    axis.title.y = element_text(size = 16),
+    axis.title.x = element_text(size = 20), 
+    axis.title.y = element_text(size = 20), 
     panel.grid.major = element_blank(), 
     panel.grid.minor = element_blank(),
     legend.position = "none"
@@ -730,14 +728,13 @@ merged_norm_reads_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = mappedco
   ylab("Total Reads Mapped") +
   theme_minimal() + 
   theme(
-    axis.line = element_line(colour = 'black', size = 0.5), 
-    axis.ticks = element_line(colour = "black", size = 0.5), 
-    plot.title = element_text(size = 14, hjust = 0.5), 
-    axis.text.x = element_text(size = 12), 
-    axis.text.y = element_text(size = 12), 
+   axis.line = element_line(colour = 'black', size = 0.5), 
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    axis.text.x = element_text(size = 16), 
+    axis.text.y = element_text(size = 16), 
     panel.background = element_blank(), 
-    axis.title.x = element_text(size = 12), 
-    axis.title.y = element_text(size = 16),
+    axis.title.x = element_text(size = 20), 
+    axis.title.y = element_text(size = 20), 
     panel.grid.major = element_blank(), 
     panel.grid.minor = element_blank(),
     legend.position = "none"
@@ -758,13 +755,12 @@ merged_norm_BC_plot <- ggplot(merged_norm_vals_sub, aes(x = TMP, y = mappedBCs, 
   theme_minimal() + 
   theme(
     axis.line = element_line(colour = 'black', size = 0.5), 
-    axis.ticks = element_line(colour = "black", size = 0.5), 
-    plot.title = element_text(size = 14, hjust = 0.5), 
-    axis.text.x = element_text(size = 12), 
-    axis.text.y = element_text(size = 12), 
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    axis.text.x = element_text(size = 16), 
+    axis.text.y = element_text(size = 16), 
     panel.background = element_blank(), 
-    axis.title.x = element_text(size = 12), 
-    axis.title.y = element_text(size = 16),
+    axis.title.x = element_text(size = 20), 
+    axis.title.y = element_text(size = 20), 
     panel.grid.major = element_blank(), 
     panel.grid.minor = element_blank(),
     legend.position = "none"
@@ -782,7 +778,7 @@ patch1
 ```
 
 ```{r echo=FALSE}
-ggsave(file="Count/PLOTS/Lib15.16.mean.reads.bcs.mapped.png", plot=patch1,
+ggsave(file="Count/PLOTS/Lib15.16.mean.reads.bcs.mapped.v2.png", plot=patch1,
        dpi=600, width = 16, height = 12, units = "in")
 ```
 
@@ -2742,7 +2738,7 @@ Subset the logFC data columns
 ```{r}
 # Lib15
 BCcontrols_15_logfc <- BCcontrols_15 %>%
-  select(BC, ctrlname, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc) %>%
+  select(BC, ctrlname, D03D01fc, D05D03fc, D06D03fc, D07D03fc, D08D03fc, D09D03fc, D10D03fc, D11D03fc) %>%
   pivot_longer(cols = -c(BC, ctrlname),
                names_to = "fc",
                names_pattern = "^(.+)$",
@@ -2753,7 +2749,7 @@ BCcontrols_15_logfc <- BCcontrols_15 %>%
 ```{r}
 # Lib16
 BCcontrols_16_logfc <- BCcontrols_16 %>%
-  select(BC, ctrlname, D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc) %>%
+  select(BC, ctrlname, D04D02fc, D12D04fc, E01D04fc, E02D04fc, E03D04fc, E04D04fc, E05D04fc, E06D04fc) %>%
   pivot_longer(cols = -c(BC, ctrlname),
                names_to = "fc",
                names_pattern = "^(.+)$",
@@ -2773,15 +2769,15 @@ BCcontrols_16_logfc <- na.omit(BCcontrols_16_logfc)
 Place sample IDs in desired order for plotting
 ```{r}
 # Lib15
-Lib15_CTRL_level_order <- c("D05D03fc", "D06D03fc", "D07D03fc", "D08D03fc", "D09D03fc", "D10D03fc", "D11D03fc")
+Lib15_CTRL_level_order <- c("D03D01fc", "D05D03fc", "D06D03fc", "D07D03fc", "D08D03fc", "D09D03fc", "D10D03fc", "D11D03fc")
 
 # Lib16
-Lib16_CTRL_level_order <- c("D12D04fc", "E01D04fc", "E02D04fc", "E03D04fc", "E04D04fc", "E05D04fc", "E06D04fc")
+Lib16_CTRL_level_order <- c("D04D02fc", "D12D04fc", "E01D04fc", "E02D04fc", "E03D04fc", "E04D04fc", "E05D04fc", "E06D04fc")
 ```
 
 **Lib15**
 ```{r}
-Lib15_TMP_level_order <- c("D05D03fc", "D06D03fc", "D07D03fc", "D08D03fc", "D09D03fc", "D10D03fc", "D11D03fc")
+Lib15_TMP_level_order <- c("D03D01fc", "D05D03fc", "D06D03fc", "D07D03fc", "D08D03fc", "D09D03fc", "D10D03fc", "D11D03fc")
 
 ctrl_tmp_plot_L15 <- ggplot(BCcontrols_15_logfc, aes(x = factor(fc, levels = Lib15_TMP_level_order), y = val, fill = Ctrl)) +
   geom_boxplot(color = "black", width = 0.5, alpha = 0.8) +
@@ -2803,7 +2799,7 @@ ctrl_tmp_plot_L15 <- ggplot(BCcontrols_15_logfc, aes(x = factor(fc, levels = Lib
         legend.title = element_blank(),
         legend.position = "none") +
   guides(linetype = "none") +
-  scale_x_discrete(labels = c("0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")) +
+  scale_x_discrete(labels = c("LB", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")) +
   scale_fill_manual(values = c("D27N" = "#00800080", "mCherry" = "#FF000080", "WT" = "#0000FF80"))
 
 ctrl_tmp_plot_L15
@@ -2811,7 +2807,7 @@ ctrl_tmp_plot_L15
 
 **Lib16**
 ```{r}
-Lib16_TMP_level_order <- c("D12D04fc", "E01D04fc", "E02D04fc", "E03D04fc", "E04D04fc", "E05D04fc", "E06D04fc")
+Lib16_TMP_level_order <- c("D04D02fc", "D12D04fc", "E01D04fc", "E02D04fc", "E03D04fc", "E04D04fc", "E05D04fc", "E06D04fc")
 
 ctrl_tmp_plot_L16 <- ggplot(BCcontrols_16_logfc, aes(x = factor(fc, levels = Lib16_TMP_level_order), y = val, fill = Ctrl)) +
   geom_boxplot(color = "black", width = 0.5, alpha = 0.8) +
@@ -2833,7 +2829,7 @@ ctrl_tmp_plot_L16 <- ggplot(BCcontrols_16_logfc, aes(x = factor(fc, levels = Lib
         legend.title = element_blank(),
         legend.position = "bottom") +
   guides(linetype = "none") +
-  scale_x_discrete(labels = c("0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")) +
+  scale_x_discrete(labels = c("LB", "0-tmp", "0.058-tmp", "0.5-tmp", "1.0-tmp", "10-tmp", "50-tmp", "200-tmp")) +
   scale_fill_manual(values = c("D27N" = "#00800080", "mCherry" = "#FF000080", "WT" = "#0000FF80"))
 
 ctrl_tmp_plot_L16
@@ -2855,7 +2851,7 @@ patch3
 ```
 
 ```{r echo=FALSE}
-ggsave(file="Count/PLOTS/Lib15.16.ctrls.trimethoprim.png", plot=patch3,
+ggsave(file="Count/PLOTS/Lib15.16.ctrls.trimethoprim.v2.png", plot=patch3,
        dpi=600, width = 8, height = 10, units = "in")
 ```
 

@@ -18,9 +18,9 @@ output:
     toc_depth: '5'
 ---
 
-<font color="green">This series of R Notebooks provides a complete reproducible pipeline for the data analysis presented in ***"Exploring Antibiotic Resistance in Diverse Homologs of the Dihydrofolate Reductase Protein Family through Broad Mutational Scanning"*** by Romanowicz, Resnick, Hinton, and Plesa (*Preprint*).</font>
+**R Notebook:** <font color="green">Provides reproducible analysis for **Gain-of-Function Mutants** in the following manuscript:</font>
 
-**Preprint (biorXiv):** []()
+**Citation:** Romanowicz KJ, Resnick C, Hinton SR, Plesa C. Exploring antibiotic resistance in diverse homologs of the dihydrofolate reductase protein family through broad mutational scanning. ***bioRxiv***, 2025. []()
 
 **GitHub Repository:** [https://github.com/PlesaLab/DHFR](https://github.com/PlesaLab/DHFR)
 
@@ -28,7 +28,7 @@ output:
 
 # Experiment
 
-This pipeline processes a library of 1,536 DHFR homologs and their associated mutants in two-fold redundancy (two codon versions). It derives fitness scores from multiple time points during a multiplexed in-vivo assay, characterizing the ability of these homologs and their mutants to complement functionality of an *E. coli* knockout strain and to tolerate treatment against the antibiotic trimethoprim. This analysis will allow us to understand how antibiotic resistance emerges given many evolutionarily divergent starting points. Sequence data were generated using the Illumina NovaSeq platform using 100 bp paired-end sequencing read amplicons.
+This pipeline processes a library of 1,536 DHFR homologs and their associated mutants, with two-fold redundancy (two codon variants per sequence). Fitness scores are derived from a multiplexed in-vivo assay using a trimethoprim concentration gradient, assessing the ability of these homologs and their mutants to complement functionality in an *E. coli* knockout strain and their tolerance to trimethoprim treatment. This analysis provides insights into how antibiotic resistance evolves across a range of evolutionary starting points. Sequence data were generated using the Illumina NovaSeq platform with 100 bp paired-end sequencing of amplicons.
 
 ![Methods overview to achieve a broad-mutational scan for DHFR homologs.](Images/DHFR.Diagram.png)
 
@@ -184,6 +184,67 @@ print(L15_perfects_complementation_density)
 ggsave(file="GOF/PLOTS/Lib15_Complementation_Perfects_low_high_fitness_density.png", plot=L15_perfects_complementation_density,
        width=6, height=5, units="in")
 ```
+
+```{r}
+# Subset mutants (mutations != 0)
+L15_perfects_complementation <- mut_collapse_15 %>%
+  filter(mutations == 0)
+
+# Remove NA and infinite values for x-axis scaling
+fitD05D03_perf_clean <- L15_perfects_complementation$fitD05D03[is.finite(L15_perfects_complementation$fitD05D03)]
+
+# Calculate the range of the data
+x_min_perf <- floor(min(fitD05D03_perf_clean, na.rm = TRUE))
+x_max_perf <- ceiling(max(fitD05D03_perf_clean, na.rm = TRUE))
+
+# Create density data
+density_data <- density(L15_perfects_complementation$fitD05D03, na.rm = TRUE)
+
+# Create a data frame from the density data
+df_density <- data.frame(x = density_data$x, y = density_data$y)
+
+# Split the data at x = -1
+df_left <- df_density[df_density$x <= -1, ]
+df_right <- df_density[df_density$x >= -1, ]
+
+# Ensure the split point is included in both datasets
+df_left <- rbind(df_left, data.frame(x = -1, y = df_left$y[nrow(df_left)]))
+df_right <- rbind(data.frame(x = -1, y = df_right$y[1]), df_right)
+
+# Plot using geom_area
+L15_perfects_complementation_density <- ggplot() +
+  geom_area(data = df_left, aes(x = x, y = y * 100), fill = "darkblue", alpha = 0.75) +
+  geom_area(data = df_right, aes(x = x, y = y * 100), fill = "gold", alpha = 0.75) +
+  geom_line(data = df_density, aes(x = x, y = y * 100), color = "black", size = 0.5) +  # Add black outline
+  geom_vline(xintercept = -1, linetype = "dashed", color = "black") +
+  scale_x_continuous(breaks = seq(x_min_perf, x_max_perf, by = 1)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), 
+                     limits = c(0, max(df_density$y) * 100)) +  # Set y-axis limits
+  labs(x = "Median Fitness (LogFC)", y = "Percentage") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = 'black', size = 1.0), 
+        axis.ticks = element_line(colour = "black", size = 1.0),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.position = "none")
+
+# Display plot
+print(L15_perfects_complementation_density)
+```
+
+```{r echo=FALSE}
+#Saving 6 x 5 in images
+ggsave(file="GOF/PLOTS/Lib15_Complementation_Mutants_low_high_fitness_density.v2.png", plot=L15_perfects_complementation_density,
+       width=6, height=5, units="in")
+```
+
 
 **Percent of Perfects with Strong Depletion (fitness < -2.5)**
 ```{r class.output="goodCode"}
