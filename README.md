@@ -25,7 +25,7 @@ Romanowicz KJ, Resnick C, Hinton SR, and Plesa C. (2025) Exploring antibiotic re
 
 [Dialout Variants Fitness Analysis](https://rpubs.com/kjromano/dhfr_dialout_rmd)
 
-**NCBI BioProject:** [PRJNA1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478) for raw .fastq files
+**NCBI BioProject:** [PRJNA1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478) for raw .fastq files used in Makefile
 
 **FigShare Repository:** [DHFR.zip](http://dx.doi.org/10.6084/m9.figshare.28266890) for mapping and count files used in RMD analysis
 _____________________________________
