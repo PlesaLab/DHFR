@@ -29,7 +29,9 @@ This GitHub repository hosts R Markdown (RMD) files and links to the rendered co
 
 **NCBI BioProject:** [PRJNA1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478) for raw .fastq files used in Makefile
 
-**FigShare Repository:** [DHFR.zip](http://dx.doi.org/10.6084/m9.figshare.28266890) for mapping and count files used in RMD analysis
+**FigShare Repositories:** 
+- [DHFR.zip](https://figshare.com/articles/dataset/Exploring_Antibiotic_Resistance_in_Diverse_Homologs_of_the_Dihydrofolate_Reductase_Protein_Family_through_Broad_Mutational_Scanning/28266890?file=51882134) for input mapping and count files used in RMD analysis
+- [DHFR_Fitness_Data_2025.zip](https://figshare.com/articles/dataset/Exploring_antibiotic_resistance_in_diverse_homologs_of_the_dihydrofolate_reductase_protein_family_through_broad_mutational_scanning/30470525?file=59131949) for output fitness data derived from RMD analysis
 _____________________________________
 
 This pipeline processes a library of 1,536 DHFR homologs and their associated mutants, with two-fold redundancy (two codon variants per sequence). Fitness scores are derived from a multiplexed in-vivo assay using a trimethoprim concentration gradient, assessing the ability of these homologs and their mutants to complement functionality in an *E. coli* knockout strain and their tolerance to trimethoprim treatment. This analysis provides insights into how antibiotic resistance evolves across a range of evolutionary starting points. Sequence data were generated using the Illumina NovaSeq platform with 100 bp paired-end sequencing of amplicons.
