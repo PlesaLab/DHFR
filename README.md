@@ -27,7 +27,8 @@ This GitHub repository hosts R Markdown (RMD) files and links to the rendered co
 
 [Dialout Variants Fitness Analysis](https://rpubs.com/kjromano/dhfr_dialout_rmd)
 
-**NCBI BioProject:** [PRJNA1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478) for raw .fastq files used in Makefile
+**NCBI BioProject:**
+- [PRJNA1189478](https://www.ncbi.nlm.nih.gov/bioproject/1189478) for raw .fastq files used in Makefile
 
 **FigShare Repositories:** 
 - [DHFR.zip](https://figshare.com/articles/dataset/Exploring_Antibiotic_Resistance_in_Diverse_Homologs_of_the_Dihydrofolate_Reductase_Protein_Family_through_Broad_Mutational_Scanning/28266890?file=51882134) — Contains the input mapping and count files used in the RMarkdown (RMD) analysis pipeline.
